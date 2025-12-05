@@ -14,6 +14,14 @@ import tls from 'node:tls';
 export function createTestTlsServer(credentials, onConnection = () => {}) {
   const { key, cert, requestCert = false } = credentials;
 
+  if (!key) {
+    throw new TypeError('TLS server requires a private key');
+  }
+
+  if (!cert) {
+    throw new TypeError('TLS server requires a certificate');
+  }
+
   return new Promise((resolve, reject) => {
     let server;
     try {
