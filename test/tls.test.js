@@ -43,8 +43,8 @@ test('node TLS client completes handshake and exchanges data', async (t) => {
   assert.strictEqual(response.toString('utf8'), 'ping');
 });
 
-test('server rejects malformed tls options', async () => {
-  await assert.rejects(
+test('server rejects malformed tls options', () => {
+  assert.throws(
     () => createTestTlsServer({ key: undefined, cert: undefined }),
     /key/,
   );

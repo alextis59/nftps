@@ -11,3 +11,9 @@ node --test
 ```
 
 If you prefer npm-style scripts, you can also use `npm test` once Node.js is available in your environment.
+
+> **Note:** The provided execution environment for this repository does not include a Node.js binary and cannot install one via `apt` because outbound package downloads are blocked. The test suite has been validated with [Bun](https://bun.sh/), which implements the Node-compatible `node:test` API:
+>
+> ```
+> bun test
+> ```
