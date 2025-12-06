@@ -6,3 +6,4 @@ export {
   TlsClient,
   makeCipherStateFromKeyBlock,
 } from './tlsClient.js';
+export { FtpsClient } from './ftpsClient.js';

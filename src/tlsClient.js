@@ -694,6 +694,18 @@ export class TlsClient {
     return client;
   }
 
+  static async fromExistingSocket(socket, { servername = 'localhost', clientCert, clientKey } = {}) {
+    if (!socket || typeof socket.write !== 'function') {
+      throw new TypeError('fromExistingSocket requires an active socket');
+    }
+
+    const chain = parsePemCertificateChain(clientCert);
+    const privateKey = parsePrivateKey(clientKey);
+    const client = new TlsClient(socket, servername, chain, privateKey);
+    await client.doHandshake();
+    return client;
+  }
+
   async doHandshake() {
     const { clientRandom, handshake: ch } = buildClientHello(this.hostname);
     this.clientRandom = clientRandom;
