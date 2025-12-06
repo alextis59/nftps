@@ -890,14 +890,16 @@ export class TlsClient {
     return fragment;
   }
 
-  async close() {
+  async close({ destroySocket = true } = {}) {
     try {
       if (this.recordLayer.state !== 'CLOSED') {
         await this.recordLayer.sendAlertCloseNotify();
       }
     } finally {
       this.recordLayer.state = 'CLOSED';
-      this.socket.destroy();
+      if (destroySocket) {
+        this.socket.destroy();
+      }
     }
   }
 }

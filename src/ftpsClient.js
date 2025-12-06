@@ -1,17 +1,21 @@
+import net from 'node:net';
 import { EventEmitter } from 'node:events';
 import { TlsClient } from './tlsClient.js';
 
 export class FtpsClient extends EventEmitter {
-  constructor({ host, port = 21, servername = host, clientCert, clientKey } = {}) {
+  constructor({ host, port = 21, servername = host, clientCert, clientKey, secure = true } = {}) {
     super();
     this.host = host;
     this.port = port;
     this.servername = servername || host || 'localhost';
     this.clientCert = clientCert;
     this.clientKey = clientKey;
+    this.secure = secure;
 
+    this.socket = null;
     this.tlsClient = null;
     this.secureBuffer = Buffer.alloc(0);
+    this.plainBuffer = Buffer.alloc(0);
   }
 
   async connect() {
@@ -19,15 +23,21 @@ export class FtpsClient extends EventEmitter {
       throw new TypeError('FtpsClient requires a host');
     }
 
-    this.tlsClient = await TlsClient.connect({
-      host: this.host,
-      port: this.port,
-      servername: this.servername,
-      clientCert: this.clientCert,
-      clientKey: this.clientKey,
+    this.socket = net.connect({ host: this.host, port: this.port });
+    await new Promise((resolve, reject) => {
+      this.socket.once('error', reject);
+      this.socket.once('connect', resolve);
     });
 
-    const greeting = await this.#readSecureLine();
+    if (this.secure) {
+      this.tlsClient = await TlsClient.fromExistingSocket(this.socket, {
+        servername: this.servername,
+        clientCert: this.clientCert,
+        clientKey: this.clientKey,
+      });
+    }
+
+    const greeting = await this.#readLine();
     this.#assertCode(greeting, 220, 'FTPS server greeting');
   }
 
@@ -49,6 +59,37 @@ export class FtpsClient extends EventEmitter {
     return protResp;
   }
 
+  async upgradeControlChannel() {
+    if (this.tlsClient) {
+      throw new Error('Control channel already secured');
+    }
+
+    const authResp = await this.sendCommand('AUTH TLS');
+    this.#assertCode(authResp, 234, 'AUTH TLS response');
+
+    this.tlsClient = await TlsClient.fromExistingSocket(this.socket, {
+      servername: this.servername,
+      clientCert: this.clientCert,
+      clientKey: this.clientKey,
+    });
+    this.secure = true;
+    this.secureBuffer = Buffer.alloc(0);
+  }
+
+  async clearCommandChannel() {
+    if (!this.tlsClient) {
+      return this.sendCommand('CCC');
+    }
+
+    const resp = await this.sendCommand('CCC');
+    this.#assertCode(resp, 200, 'CCC response');
+    await this.tlsClient.close({ destroySocket: false });
+    this.tlsClient = null;
+    this.secure = false;
+    this.plainBuffer = Buffer.alloc(0);
+    return resp;
+  }
+
   async pwd() {
     const resp = await this.sendCommand('PWD');
     this.#assertCode(resp, 257, 'PWD response');
@@ -56,7 +97,7 @@ export class FtpsClient extends EventEmitter {
   }
 
   async quit() {
-    if (this.tlsClient) {
+    if (this.socket) {
       const resp = await this.sendCommand('QUIT');
       this.#assertCode(resp, 221, 'QUIT response');
     }
@@ -70,24 +111,38 @@ export class FtpsClient extends EventEmitter {
       }
     } finally {
       this.tlsClient = null;
+      if (this.socket) {
+        this.socket.destroy();
+        this.socket = null;
+      }
     }
   }
 
   async sendCommand(command) {
-    if (!this.tlsClient) {
-      throw new Error('FTPS control channel is not secured yet');
-    }
     this.emit('command', command);
-    await this.tlsClient.sendApplicationData(Buffer.from(`${command}\r\n`, 'utf8'));
-    return this.#readSecureLine();
+    if (this.tlsClient) {
+      await this.tlsClient.sendApplicationData(Buffer.from(`${command}\r\n`, 'utf8'));
+    } else if (this.socket) {
+      await new Promise((resolve, reject) => {
+        this.socket.write(`${command}\r\n`, (err) => (err ? reject(err) : resolve()));
+      });
+    } else {
+      throw new Error('FTPS client is not connected');
+    }
+
+    return this.#readLine();
   }
 
-  async #readSecureLine() {
-    return this.#readLineFromSource(async () => this.tlsClient.readApplicationData());
+  async #readLine() {
+    if (this.tlsClient) {
+      return this.#readLineFromSource('secureBuffer', async () => this.tlsClient.readApplicationData());
+    }
+    return this.#readLineFromSource('plainBuffer', async () =>
+      new Promise((resolve) => this.socket.once('data', resolve)),
+    );
   }
 
-  async #readLineFromSource(nextChunk) {
-    const bufferKey = 'secureBuffer';
+  async #readLineFromSource(bufferKey, nextChunk) {
     while (true) {
       const buf = this[bufferKey];
       const newlineIndex = buf.indexOf(0x0a);
