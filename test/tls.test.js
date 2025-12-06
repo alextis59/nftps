@@ -3,7 +3,7 @@ import assert from 'node:assert';
 import { once } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import tls from 'node:tls';
-import { createTestTlsServer } from '../src/index.js';
+import { createTestTlsServer, TlsClient } from '../src/index.js';
 
 const keyPath = new URL('../certs/server.key', import.meta.url);
 const certPath = new URL('../certs/server.crt', import.meta.url);
@@ -40,6 +40,29 @@ test('node TLS client completes handshake and exchanges data', async (t) => {
 
   client.write('ping');
   const [response] = await once(client, 'data');
+  assert.strictEqual(response.toString('utf8'), 'ping');
+});
+
+test('custom TLS client completes handshake and exchanges data', async (t) => {
+  const creds = await loadCredentials();
+
+  const server = await createTestTlsServer(creds, (socket) => {
+    socket.on('data', (chunk) => socket.write(chunk));
+  });
+
+  const client = await TlsClient.connect({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await client.sendApplicationData(Buffer.from('ping'));
+  const response = await client.readApplicationData();
   assert.strictEqual(response.toString('utf8'), 'ping');
 });
 
