@@ -260,6 +260,35 @@ function derToPem(der, label) {
   return `-----BEGIN ${label}-----\n${lines.join('\n')}\n-----END ${label}-----\n`;
 }
 
+function pemToDer(pem, label) {
+  const text = Buffer.isBuffer(pem) ? pem.toString('utf8') : String(pem);
+  const sanitized = text
+    .replace(`-----BEGIN ${label}-----`, '')
+    .replace(`-----END ${label}-----`, '')
+    .replace(/\s+/g, '');
+  return Buffer.from(sanitized, 'base64');
+}
+
+function parsePemCertificateChain(certPem) {
+  if (certPem === undefined) return [];
+
+  const text = Buffer.isBuffer(certPem) ? certPem.toString('utf8') : String(certPem);
+  const matches = text.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
+  if (!matches || matches.length === 0) {
+    throw new Error('Client certificate must contain at least one CERTIFICATE block');
+  }
+
+  return matches.map((block) => pemToDer(block, 'CERTIFICATE'));
+}
+
+function parsePrivateKey(keyPem) {
+  if (keyPem === undefined) return undefined;
+  if (typeof keyPem !== 'string' && !Buffer.isBuffer(keyPem)) {
+    throw new TypeError('clientKey must be a string or Buffer');
+  }
+  return Buffer.isBuffer(keyPem) ? keyPem.toString('utf8') : keyPem;
+}
+
 function buildPreMasterSecret() {
   const pms = Buffer.alloc(48);
   pms.writeUInt16BE(TLS_VERSION_1_2, 0);
@@ -285,6 +314,54 @@ function buildClientKeyExchange(encryptedPms) {
 
   const header = Buffer.alloc(4);
   header.writeUInt8(0x10, 0);
+  header.writeUIntBE(body.length, 1, 3);
+
+  return Buffer.concat([header, body]);
+}
+
+function buildClientCertificate(chainDer) {
+  if (!Array.isArray(chainDer) || chainDer.length === 0) {
+    throw new Error('Client certificate chain cannot be empty when building Certificate message');
+  }
+
+  const certEntries = chainDer.map((cert) => {
+    if (!Buffer.isBuffer(cert)) {
+      throw new TypeError('Certificate entries must be Buffers');
+    }
+    const len = Buffer.alloc(3);
+    len.writeUIntBE(cert.length, 0, 3);
+    return Buffer.concat([len, cert]);
+  });
+
+  const concatenated = Buffer.concat(certEntries);
+  const bodyLen = Buffer.alloc(3);
+  bodyLen.writeUIntBE(concatenated.length, 0, 3);
+  const body = Buffer.concat([bodyLen, concatenated]);
+
+  const header = Buffer.alloc(4);
+  header.writeUInt8(0x0b, 0);
+  header.writeUIntBE(body.length, 1, 3);
+
+  return Buffer.concat([header, body]);
+}
+
+function buildCertificateVerify(privateKeyPem, handshakeTranscript) {
+  if (!privateKeyPem) {
+    throw new Error('Private key required to build CertificateVerify');
+  }
+
+  const signer = crypto.createSign('RSA-SHA256');
+  signer.update(Buffer.concat(handshakeTranscript));
+  const signature = signer.sign(privateKeyPem);
+
+  const body = Buffer.alloc(4 + signature.length);
+  body.writeUInt8(0x04, 0); // sha256
+  body.writeUInt8(0x01, 1); // rsa
+  body.writeUInt16BE(signature.length, 2);
+  signature.copy(body, 4);
+
+  const header = Buffer.alloc(4);
+  header.writeUInt8(0x0f, 0);
   header.writeUIntBE(body.length, 1, 3);
 
   return Buffer.concat([header, body]);
@@ -318,6 +395,58 @@ function parseFinishedHandshake(fragment) {
   }
 
   return { verifyData: body };
+}
+
+function parseCertificateRequest(body) {
+  let offset = 0;
+
+  if (body.length < 1) {
+    throw new Error('CertificateRequest too short');
+  }
+
+  const certTypesLen = body.readUInt8(offset);
+  offset += 1;
+  const certTypes = [...body.subarray(offset, offset + certTypesLen)];
+  offset += certTypesLen;
+
+  if (offset + 2 > body.length) {
+    throw new Error('CertificateRequest missing signature_algorithms length');
+  }
+
+  const sigAlgosLen = body.readUInt16BE(offset);
+  offset += 2;
+  const sigAlgosEnd = offset + sigAlgosLen;
+  if (sigAlgosEnd > body.length) {
+    throw new Error('Invalid signature_algorithms length in CertificateRequest');
+  }
+
+  const signatureAlgorithms = [];
+  while (offset + 1 < sigAlgosEnd) {
+    const hash = body.readUInt8(offset);
+    const signature = body.readUInt8(offset + 1);
+    signatureAlgorithms.push({ hash, signature });
+    offset += 2;
+  }
+
+  if (offset !== sigAlgosEnd) {
+    throw new Error('Trailing bytes in CertificateRequest signature_algorithms');
+  }
+
+  if (offset + 2 > body.length) {
+    throw new Error('CertificateRequest missing distinguished_names length');
+  }
+
+  const namesLen = body.readUInt16BE(offset);
+  offset += 2;
+  const namesEnd = offset + namesLen;
+  if (namesEnd > body.length) {
+    throw new Error('Invalid distinguished_names length in CertificateRequest');
+  }
+
+  // Skip distinguished names; we don't need them for the test scenarios
+  offset = namesEnd;
+
+  return { certTypes, signatureAlgorithms };
 }
 
 /**
@@ -540,9 +669,11 @@ export class TlsRecordLayer {
 }
 
 export class TlsClient {
-  constructor(socket, hostname) {
+  constructor(socket, hostname, clientCertChain = [], clientPrivateKey) {
     this.socket = socket;
     this.hostname = hostname;
+    this.clientCertChain = clientCertChain;
+    this.clientPrivateKey = clientPrivateKey;
 
     this.tcp = new TcpStream(socket);
     this.recordLayer = new TlsRecordLayer(this.tcp);
@@ -553,10 +684,12 @@ export class TlsClient {
     };
   }
 
-  static async connect({ host, port, servername = host }) {
+  static async connect({ host, port, servername = host, clientCert, clientKey }) {
     const socket = net.connect({ host, port });
     await once(socket, 'connect');
-    const client = new TlsClient(socket, servername);
+    const chain = parsePemCertificateChain(clientCert);
+    const privateKey = parsePrivateKey(clientKey);
+    const client = new TlsClient(socket, servername, chain, privateKey);
     await client.doHandshake();
     return client;
   }
@@ -568,51 +701,97 @@ export class TlsClient {
 
     await this.recordLayer.writePlainRecord(0x16, ch);
 
-    let msg = await this.readHandshakeMessage(false);
-    if (msg.type !== 0x02) {
-      throw new Error('Expected ServerHello');
-    }
-    this.handshakeTranscript.push(msg.raw);
+    let serverCertPem;
+    let sawServerHello = false;
+    let sawServerCert = false;
+    let certRequest = null;
 
-    const serverHello = parseServerHello(msg.body);
-    this.serverRandom = serverHello.random;
-    if (serverHello.version !== TLS_VERSION_1_2) {
-      throw new Error(`Unsupported TLS version 0x${serverHello.version.toString(16)}`);
-    }
-    if (serverHello.cipherSuite !== 0x002f) {
-      throw new Error(`Server selected unsupported cipher suite 0x${serverHello.cipherSuite.toString(16)}`);
-    }
-    if (serverHello.compression !== 0x00) {
-      throw new Error('Server selected non-null compression');
+    while (true) {
+      const msg = await this.readHandshakeMessage(false);
+
+      if (msg.type === 0x02) {
+        this.handshakeTranscript.push(msg.raw);
+        const serverHello = parseServerHello(msg.body);
+        this.serverRandom = serverHello.random;
+        sawServerHello = true;
+
+        if (serverHello.version !== TLS_VERSION_1_2) {
+          throw new Error(`Unsupported TLS version 0x${serverHello.version.toString(16)}`);
+        }
+        if (serverHello.cipherSuite !== 0x002f) {
+          throw new Error(`Server selected unsupported cipher suite 0x${serverHello.cipherSuite.toString(16)}`);
+        }
+        if (serverHello.compression !== 0x00) {
+          throw new Error('Server selected non-null compression');
+        }
+        continue;
+      }
+
+      if (msg.type === 0x0b) {
+        this.handshakeTranscript.push(msg.raw);
+        const chain = parseCertificate(msg.body);
+        this.serverCertChain = chain;
+        serverCertPem = derToPem(chain[0], 'CERTIFICATE');
+        sawServerCert = true;
+        continue;
+      }
+
+      if (msg.type === 0x0d) {
+        this.handshakeTranscript.push(msg.raw);
+        certRequest = parseCertificateRequest(msg.body);
+        continue;
+      }
+
+      if (msg.type === 0x0e) {
+        this.handshakeTranscript.push(msg.raw);
+        break;
+      }
+
+      throw new Error(`Unexpected handshake message type 0x${msg.type.toString(16)}`);
     }
 
-    msg = await this.readHandshakeMessage(false);
-    if (msg.type !== 0x0b) {
-      throw new Error('Expected Certificate');
+    if (!sawServerHello || !sawServerCert || !serverCertPem) {
+      throw new Error('Incomplete server handshake messages');
     }
-    this.handshakeTranscript.push(msg.raw);
-
-    const chain = parseCertificate(msg.body);
-    this.serverCertChain = chain;
-    const serverCertPem = derToPem(chain[0], 'CERTIFICATE');
-
-    msg = await this.readHandshakeMessage(false);
-    if (msg.type !== 0x0e) {
-      throw new Error('Expected ServerHelloDone');
-    }
-    this.handshakeTranscript.push(msg.raw);
 
     this.preMasterSecret = buildPreMasterSecret();
     const encPms = encryptPreMasterSecret(this.preMasterSecret, serverCertPem);
     const ckx = buildClientKeyExchange(encPms);
+
+    let sentClientCert = false;
+    if (certRequest) {
+      const supportsRsaCert = certRequest.certTypes.includes(1);
+      const supportsRsaSha256 = certRequest.signatureAlgorithms.some(
+        (alg) => alg.hash === 0x04 && alg.signature === 0x01,
+      );
+
+      if (!supportsRsaCert || !supportsRsaSha256) {
+        throw new Error('Server CertificateRequest does not support RSA with SHA256');
+      }
+
+      if (this.clientCertChain.length === 0 || !this.clientPrivateKey) {
+        throw new Error('Server requested client certificate but none configured');
+      }
+
+      const clientCertMsg = buildClientCertificate(this.clientCertChain);
+      this.handshakeTranscript.push(clientCertMsg);
+      await this.recordLayer.writePlainRecord(0x16, clientCertMsg);
+      sentClientCert = true;
+    }
+
     this.handshakeTranscript.push(ckx);
+    await this.recordLayer.writePlainRecord(0x16, ckx);
 
     this.masterSecret = deriveMasterSecret(this.preMasterSecret, this.clientRandom, this.serverRandom);
     const keyBlock = deriveKeyBlock(this.masterSecret, this.serverRandom, this.clientRandom, 104);
     const cipherState = makeCipherStateFromKeyBlock(keyBlock);
     this.recordLayer.installCipher(cipherState);
 
-    await this.recordLayer.writePlainRecord(0x16, ckx);
+    if (sentClientCert) {
+      const certVerify = buildCertificateVerify(this.clientPrivateKey, this.handshakeTranscript);
+      this.handshakeTranscript.push(certVerify);
+      await this.recordLayer.writePlainRecord(0x16, certVerify);
+    }
     await this.recordLayer.sendChangeCipherSpec();
 
     const transcriptBuf = Buffer.concat(this.handshakeTranscript);
