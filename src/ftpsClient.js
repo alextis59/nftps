@@ -1,9 +1,18 @@
 import net from 'node:net';
+import tls from 'node:tls';
 import { EventEmitter } from 'node:events';
 import { TlsClient } from './tlsClient.js';
 
 export class FtpsClient extends EventEmitter {
-  constructor({ host, port = 21, servername = host, clientCert, clientKey, secure = true } = {}) {
+  constructor({
+    host,
+    port = 21,
+    servername = host,
+    clientCert,
+    clientKey,
+    secure = true,
+    ignorePasvAddress = false,
+  } = {}) {
     super();
     this.host = host;
     this.port = port;
@@ -11,11 +20,13 @@ export class FtpsClient extends EventEmitter {
     this.clientCert = clientCert;
     this.clientKey = clientKey;
     this.secure = secure;
+    this.ignorePasvAddress = ignorePasvAddress;
 
     this.socket = null;
     this.tlsClient = null;
     this.secureBuffer = Buffer.alloc(0);
     this.plainBuffer = Buffer.alloc(0);
+    this.dataProtection = secure ? 'P' : 'C';
   }
 
   async connect() {
@@ -56,6 +67,7 @@ export class FtpsClient extends EventEmitter {
 
     const protResp = await this.sendCommand('PROT P');
     this.#assertCode(protResp, 200, 'PROT response');
+    this.dataProtection = 'P';
     return protResp;
   }
 
@@ -66,6 +78,9 @@ export class FtpsClient extends EventEmitter {
 
     const authResp = await this.sendCommand('AUTH TLS');
     this.#assertCode(authResp, 234, 'AUTH TLS response');
+    if (!this.secure) {
+      return;
+    }
 
     this.tlsClient = await TlsClient.fromExistingSocket(this.socket, {
       servername: this.servername,
@@ -83,11 +98,53 @@ export class FtpsClient extends EventEmitter {
 
     const resp = await this.sendCommand('CCC');
     this.#assertCode(resp, 200, 'CCC response');
-    await this.tlsClient.close({ destroySocket: false });
+    await this.tlsClient.close({ destroySocket: false, sendCloseNotify: false });
     this.tlsClient = null;
     this.secure = false;
+    this.dataProtection = 'C';
     this.plainBuffer = Buffer.alloc(0);
     return resp;
+  }
+
+  async enterPassiveMode() {
+    const resp = await this.sendCommand('PASV');
+    this.#assertCode(resp, 227, 'PASV response');
+    const match = resp.match(/\((\d+,\d+,\d+,\d+),(\d+),(\d+)\)/);
+    if (!match) {
+      throw new Error(`Malformed PASV response: ${resp}`);
+    }
+    const host = this.ignorePasvAddress && this.host ? this.host : match[1].replace(/,/g, '.');
+    const port = Number(match[2]) * 256 + Number(match[3]);
+    return { host, port };
+  }
+
+  async retrieveFile(path) {
+    return this.executeDataCommand(`RETR ${path}`);
+  }
+
+  async executeDataCommand(command) {
+    const { host, port } = await this.enterPassiveMode();
+    const dataSocket = await this.#connectDataSocket(host, port);
+    const dataChunks = [];
+    dataSocket.on('data', (chunk) => dataChunks.push(chunk));
+    const dataEnd = new Promise((resolve, reject) => {
+      dataSocket.once('end', resolve);
+      dataSocket.once('error', reject);
+    });
+
+    await this.#sendOnly(command);
+    const opening = await this.#readLine();
+    this.#assertCode(opening, 150, `${command} open response`);
+
+    await dataEnd;
+    dataSocket.destroy();
+
+    const closing = await this.#readLine();
+    if (!closing.startsWith('226')) {
+      throw new Error(`${command} completion failed: ${closing}`);
+    }
+
+    return Buffer.concat(dataChunks);
   }
 
   async pwd() {
@@ -119,6 +176,16 @@ export class FtpsClient extends EventEmitter {
   }
 
   async sendCommand(command) {
+    await this.#sendOnly(command);
+    const resp = await this.#readLine();
+    if (command.toUpperCase().startsWith('PROT') && resp?.startsWith('200')) {
+      const [, arg = ''] = command.split(/\s+/, 2);
+      this.dataProtection = arg.trim().toUpperCase() || this.dataProtection;
+    }
+    return resp;
+  }
+
+  async #sendOnly(command) {
     this.emit('command', command);
     if (this.tlsClient) {
       await this.tlsClient.sendApplicationData(Buffer.from(`${command}\r\n`, 'utf8'));
@@ -129,8 +196,6 @@ export class FtpsClient extends EventEmitter {
     } else {
       throw new Error('FTPS client is not connected');
     }
-
-    return this.#readLine();
   }
 
   async #readLine() {
@@ -157,6 +222,29 @@ export class FtpsClient extends EventEmitter {
       const chunk = await nextChunk();
       this[bufferKey] = Buffer.concat([buf, chunk]);
     }
+  }
+
+  async #connectDataSocket(host, port) {
+    if (this.dataProtection === 'P') {
+      const socket = tls.connect({
+        host,
+        port,
+        servername: this.servername,
+        rejectUnauthorized: false,
+      });
+      await new Promise((resolve, reject) => {
+        socket.once('secureConnect', resolve);
+        socket.once('error', reject);
+      });
+      return socket;
+    }
+
+    const socket = net.connect({ host, port });
+    await new Promise((resolve, reject) => {
+      socket.once('connect', resolve);
+      socket.once('error', reject);
+    });
+    return socket;
   }
 
   #assertCode(line, expected, context) {

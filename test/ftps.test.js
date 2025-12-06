@@ -17,7 +17,7 @@ async function loadCredentials() {
   return { key, cert };
 }
 
-async function createFtpsServer(credentials) {
+async function createFtpsServer(credentials, { pasvAdvertisedHost = '127.0.0.1' } = {}) {
   const { key, cert } = credentials;
   const server = tls.createServer({
     key,
@@ -28,7 +28,7 @@ async function createFtpsServer(credentials) {
     maxVersion: 'TLSv1.2',
   });
 
-  server.on('secureConnection', (socket) => handleConnection(socket));
+  server.on('secureConnection', (socket) => handleConnection(socket, credentials, { pasvAdvertisedHost }));
 
   return await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -51,7 +51,7 @@ async function createFtpsServer(credentials) {
   });
 }
 
-async function createExplicitFtpsServer(credentials) {
+async function createExplicitFtpsServer(credentials, { pasvAdvertisedHost = '127.0.0.1' } = {}) {
   const { key, cert } = credentials;
   const secureContext = tls.createSecureContext({
     key,
@@ -63,7 +63,9 @@ async function createExplicitFtpsServer(credentials) {
 
   const server = net.createServer();
 
-  server.on('connection', (socket) => handleExplicitConnection(socket, secureContext));
+  server.on('connection', (socket) =>
+    handleExplicitConnection(socket, secureContext, credentials, { pasvAdvertisedHost }),
+  );
 
   return await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -86,14 +88,63 @@ async function createExplicitFtpsServer(credentials) {
   });
 }
 
-function handleConnection(socket) {
+async function createPassiveDataServer({ secure, credentials }) {
+  const server = secure
+    ? tls.createServer({
+        ...credentials,
+        ciphers: 'AES128-SHA',
+        honorCipherOrder: true,
+        minVersion: 'TLSv1.2',
+        maxVersion: 'TLSv1.2',
+      })
+    : net.createServer();
+
+  let resolveSocket;
+  const socketPromise = new Promise((resolve) => {
+    resolveSocket = resolve;
+  });
+
+  const eventName = secure ? 'secureConnection' : 'connection';
+  server.once(eventName, (dataSocket) => resolveSocket(dataSocket));
+
+  const listening = await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      if (!addr || typeof addr === 'string') {
+        reject(new Error('Unable to determine passive server address'));
+        return;
+      }
+      server.off('error', reject);
+      resolve(addr);
+    });
+  });
+
+  const close = () =>
+    new Promise((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+
+  return { socketPromise, port: listening.port, close };
+}
+
+function handleConnection(socket, credentials, { pasvAdvertisedHost }) {
   let loggedIn = false;
   let buffer = Buffer.alloc(0);
+  let passiveServer = null;
+  let dataProtection = 'P';
 
   const sendLine = (line) => socket.write(`${line}\r\n`);
   const cleanup = () => socket.destroy();
 
-  const processCommand = (line) => {
+  const teardownPassive = async () => {
+    if (passiveServer) {
+      await passiveServer.close();
+      passiveServer = null;
+    }
+  };
+
+  const [pasvH1, pasvH2, pasvH3, pasvH4] = pasvAdvertisedHost.split('.');
+
+  const processCommand = async (line) => {
     const [command, ...rest] = line.trim().split(/\s+/);
     const arg = rest.join(' ');
 
@@ -113,7 +164,48 @@ function handleConnection(socket) {
         return;
       case 'PROT':
         sendLine('200 Protection level set to Private.');
+        dataProtection = 'P';
         return;
+      case 'PASV': {
+        await teardownPassive();
+        const { port, socketPromise, close } = await createPassiveDataServer({
+          secure: dataProtection === 'P',
+          credentials,
+        });
+        passiveServer = { socketPromise, close };
+        const p1 = Math.floor(port / 256);
+        const p2 = port % 256;
+        sendLine(`227 Entering Passive Mode (${pasvH1},${pasvH2},${pasvH3},${pasvH4},${p1},${p2}).`);
+        return;
+      }
+      case 'RETR': {
+        if (!passiveServer) {
+          sendLine('425 Use PASV first.');
+          return;
+        }
+        const dataSocket = await passiveServer.socketPromise;
+        sendLine('150 Opening data connection.');
+        dataSocket.end('file-data-for-testing');
+        dataSocket.once('close', async () => {
+          await teardownPassive();
+          sendLine('226 Transfer complete.');
+        });
+        return;
+      }
+      case 'ECHO': {
+        if (!passiveServer) {
+          sendLine('425 Use PASV first.');
+          return;
+        }
+        const dataSocket = await passiveServer.socketPromise;
+        sendLine('150 Opening data connection.');
+        dataSocket.end(arg || '');
+        dataSocket.once('close', async () => {
+          await teardownPassive();
+          sendLine('226 Echo complete.');
+        });
+        return;
+      }
       case 'PWD':
         if (!loggedIn) {
           sendLine('530 Not logged in.');
@@ -137,7 +229,7 @@ function handleConnection(socket) {
       if (idx === -1) break;
       const line = buffer.subarray(0, idx + 1).toString('utf8').replace(/\r?\n$/, '');
       buffer = buffer.subarray(idx + 1);
-      processCommand(line);
+      processCommand(line).catch(cleanup);
     }
   };
 
@@ -146,15 +238,26 @@ function handleConnection(socket) {
   sendLine('220 Test FTPS server ready');
 }
 
-function handleExplicitConnection(socket, secureContext) {
+function handleExplicitConnection(socket, secureContext, credentials, { pasvAdvertisedHost }) {
   let loggedIn = false;
   let buffer = Buffer.alloc(0);
   let currentSocket = socket;
   let secureSocket = null;
   let usingTls = false;
+  let passiveServer = null;
+  let dataProtection = 'C';
 
   const sendLine = (line) => currentSocket.write(`${line}\r\n`);
   const cleanup = () => currentSocket.destroy();
+
+  const teardownPassive = async () => {
+    if (passiveServer) {
+      await passiveServer.close();
+      passiveServer = null;
+    }
+  };
+
+  const [pasvH1, pasvH2, pasvH3, pasvH4] = pasvAdvertisedHost.split('.');
 
   const processCommand = (line) => {
     const [command, ...rest] = line.trim().split(/\s+/);
@@ -164,22 +267,6 @@ function handleExplicitConnection(socket, secureContext) {
       case 'AUTH': {
         sendLine('234 Proceed with negotiation.');
         if (usingTls) return;
-
-        socket.off('data', onData);
-        const tlsSocket = new tls.TLSSocket(socket, {
-          isServer: true,
-          secureContext,
-          honorCipherOrder: true,
-        });
-        usingTls = true;
-        secureSocket = tlsSocket;
-        buffer = Buffer.alloc(0);
-
-        tlsSocket.once('secure', () => {
-          currentSocket = tlsSocket;
-          tlsSocket.on('data', onData);
-        });
-        tlsSocket.once('error', cleanup);
         return;
       }
       case 'USER':
@@ -193,7 +280,8 @@ function handleExplicitConnection(socket, secureContext) {
         sendLine('200 PBSZ set to 0.');
         return;
       case 'PROT':
-        sendLine('200 Protection level set to Clear.');
+        dataProtection = arg?.toUpperCase() || 'C';
+        sendLine(`200 Protection level set to ${dataProtection === 'P' ? 'Private' : 'Clear'}.`);
         return;
       case 'CCC':
         sendLine('200 Command channel unprotected.');
@@ -205,6 +293,49 @@ function handleExplicitConnection(socket, secureContext) {
           socket.on('data', onData);
         }
         return;
+      case 'PASV': {
+        return (async () => {
+          await teardownPassive();
+          const { port, socketPromise, close } = await createPassiveDataServer({
+            secure: dataProtection === 'P',
+            credentials,
+          });
+          passiveServer = { socketPromise, close };
+          const p1 = Math.floor(port / 256);
+          const p2 = port % 256;
+          sendLine(`227 Entering Passive Mode (${pasvH1},${pasvH2},${pasvH3},${pasvH4},${p1},${p2}).`);
+        })();
+      }
+      case 'RETR': {
+        return (async () => {
+          if (!passiveServer) {
+            sendLine('425 Use PASV first.');
+            return;
+          }
+          const dataSocket = await passiveServer.socketPromise;
+          sendLine('150 Opening data connection.');
+          dataSocket.end('file-data-for-testing');
+          dataSocket.once('close', async () => {
+            await teardownPassive();
+            sendLine('226 Transfer complete.');
+          });
+        })();
+      }
+      case 'ECHO': {
+        return (async () => {
+          if (!passiveServer) {
+            sendLine('425 Use PASV first.');
+            return;
+          }
+          const dataSocket = await passiveServer.socketPromise;
+          sendLine('150 Opening data connection.');
+          dataSocket.end(arg || '');
+          dataSocket.once('close', async () => {
+            await teardownPassive();
+            sendLine('226 Echo complete.');
+          });
+        })();
+      }
       case 'PWD':
         if (!loggedIn) {
           sendLine('530 Not logged in.');
@@ -228,7 +359,7 @@ function handleExplicitConnection(socket, secureContext) {
       if (idx === -1) break;
       const line = buffer.subarray(0, idx + 1).toString('utf8').replace(/\r?\n$/, '');
       buffer = buffer.subarray(idx + 1);
-      processCommand(line);
+      Promise.resolve(processCommand(line)).catch(cleanup);
     }
   };
 
@@ -251,6 +382,16 @@ function createLineReader(stream) {
       buf = Buffer.concat([buf, chunk]);
     }
   };
+}
+
+function parsePassiveResponse(resp) {
+  const match = resp.match(/\((\d+,\d+,\d+,\d+),(\d+),(\d+)\)/);
+  if (!match) {
+    throw new Error(`Invalid PASV response: ${resp}`);
+  }
+  const host = match[1].replace(/,/g, '.');
+  const port = Number(match[2]) * 256 + Number(match[3]);
+  return { host, port };
 }
 
 test('node FTPS client negotiates and logs in', async (t) => {
@@ -303,6 +444,70 @@ test('node FTPS client negotiates and logs in', async (t) => {
   assert.match(quitResp, /^221/);
 });
 
+test('node FTPS client retrieves data over passive mode', async (t) => {
+  const creds = await loadCredentials();
+  const server = await createFtpsServer(creds);
+
+  const client = tls.connect({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    ca: [creds.cert],
+    ciphers: 'AES128-SHA',
+    minVersion: 'TLSv1.2',
+    maxVersion: 'TLSv1.2',
+  });
+
+  t.after(async () => {
+    client.destroy();
+    await server.close();
+  });
+
+  await once(client, 'secureConnect');
+  const read = createLineReader(client);
+
+  assert.match(await read(), /^220/);
+  client.write('USER test\r\n');
+  assert.match(await read(), /^331/);
+  client.write('PASS password\r\n');
+  assert.match(await read(), /^230/);
+  client.write('PBSZ 0\r\n');
+  assert.match(await read(), /^200/);
+  client.write('PROT P\r\n');
+  assert.match(await read(), /^200/);
+
+  client.write('PASV\r\n');
+  const pasvResp = await read();
+  assert.match(pasvResp, /^227/);
+  const { host, port } = parsePassiveResponse(pasvResp);
+
+  const dataSocket = tls.connect({
+    host,
+    port,
+    servername: 'localhost',
+    ca: [creds.cert],
+    ciphers: 'AES128-SHA',
+    minVersion: 'TLSv1.2',
+    maxVersion: 'TLSv1.2',
+  });
+  await once(dataSocket, 'secureConnect');
+
+  const chunks = [];
+  dataSocket.on('data', (chunk) => chunks.push(chunk));
+  const dataEnd = once(dataSocket, 'end');
+
+  client.write('RETR file.txt\r\n');
+  assert.match(await read(), /^150/);
+  await dataEnd;
+  assert.match(await read(), /^226/);
+
+  const body = Buffer.concat(chunks).toString('utf8');
+  assert.strictEqual(body, 'file-data-for-testing');
+
+  client.write('QUIT\r\n');
+  assert.match(await read(), /^221/);
+});
+
 test('custom FTPS client negotiates and logs in', async (t) => {
   const creds = await loadCredentials();
   const server = await createFtpsServer(creds);
@@ -336,6 +541,55 @@ test('custom FTPS client negotiates and logs in', async (t) => {
     '257 "/" is current directory',
     '221 Service closing control connection.',
   ]);
+});
+
+test('custom FTPS client performs data transfers over PASV', async (t) => {
+  const creds = await loadCredentials();
+  const server = await createFtpsServer(creds);
+
+  const client = new FtpsClient({ host: '127.0.0.1', port: server.port, servername: 'localhost' });
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await client.connect();
+  await client.login('test', 'password');
+  await client.setProtectedDataChannel();
+
+  const fileData = await client.retrieveFile('file.txt');
+  assert.strictEqual(fileData.toString('utf8'), 'file-data-for-testing');
+
+  const echoed = await client.executeDataCommand('ECHO hello world');
+  assert.strictEqual(echoed.toString('utf8'), 'hello world');
+
+  await client.quit();
+});
+
+test('custom FTPS client can ignore advertised PASV address', async (t) => {
+  const creds = await loadCredentials();
+  const server = await createFtpsServer(creds, { pasvAdvertisedHost: '192.0.2.10' });
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    ignorePasvAddress: true,
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await client.connect();
+  await client.login('test', 'password');
+  await client.setProtectedDataChannel();
+
+  const fileData = await client.retrieveFile('file.txt');
+  assert.strictEqual(fileData.toString('utf8'), 'file-data-for-testing');
+
+  await client.quit();
 });
 
 test('custom FTPS client upgrades, downgrades, and continues over cleartext', async (t) => {
