@@ -181,6 +181,11 @@ test('custom FTPS client negotiates and logs in', async (t) => {
   const server = await createFtpsServer(creds);
 
   const client = new FtpsClient({ host: '127.0.0.1', port: server.port, servername: 'localhost' });
+  const received = [];
+  const sent = [];
+
+  client.on('data', (line) => received.push(line));
+  client.on('command', (cmd) => sent.push(cmd));
 
   t.after(async () => {
     await client.close();
@@ -193,4 +198,15 @@ test('custom FTPS client negotiates and logs in', async (t) => {
   const pwdResp = await client.pwd();
   assert.match(pwdResp, /^257/);
   await client.quit();
+
+  assert.deepStrictEqual(sent, ['USER test', 'PASS password', 'PBSZ 0', 'PROT P', 'PWD', 'QUIT']);
+  assert.deepStrictEqual(received, [
+    '220 Test FTPS server ready',
+    '331 User name okay, need password.',
+    '230 User logged in, proceed.',
+    '200 PBSZ set to 0.',
+    '200 Protection level set to Private.',
+    '257 "/" is current directory',
+    '221 Service closing control connection.',
+  ]);
 });

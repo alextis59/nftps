@@ -1,7 +1,9 @@
+import { EventEmitter } from 'node:events';
 import { TlsClient } from './tlsClient.js';
 
-export class FtpsClient {
+export class FtpsClient extends EventEmitter {
   constructor({ host, port = 21, servername = host, clientCert, clientKey } = {}) {
+    super();
     this.host = host;
     this.port = port;
     this.servername = servername || host || 'localhost';
@@ -75,6 +77,7 @@ export class FtpsClient {
     if (!this.tlsClient) {
       throw new Error('FTPS control channel is not secured yet');
     }
+    this.emit('command', command);
     await this.tlsClient.sendApplicationData(Buffer.from(`${command}\r\n`, 'utf8'));
     return this.#readSecureLine();
   }
@@ -91,7 +94,9 @@ export class FtpsClient {
       if (newlineIndex !== -1) {
         const line = buf.subarray(0, newlineIndex + 1);
         this[bufferKey] = buf.subarray(newlineIndex + 1);
-        return line.toString('utf8').replace(/\r?\n$/, '');
+        const text = line.toString('utf8').replace(/\r?\n$/, '');
+        this.emit('data', text);
+        return text;
       }
 
       const chunk = await nextChunk();
