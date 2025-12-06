@@ -7,7 +7,13 @@ import tls from 'node:tls';
  * listener is active and returns helpers for closing the server when tests
  * finish.
  *
- * @param {{key: Buffer|string, cert: Buffer|string, requestCert?: boolean}} credentials
+ * @param {{
+ *   key: Buffer|string,
+ *   cert: Buffer|string,
+ *   requestCert?: boolean,
+ *   ca?: Array<Buffer|string>,
+ *   rejectUnauthorized?: boolean,
+ * }} credentials
  * @param {(socket: tls.TLSSocket) => void} [onConnection]
  * @returns {Promise<{server: tls.Server, port: number, close: () => Promise<void>}>}
  */
@@ -20,7 +26,13 @@ export function createTestTlsServer(credentials = {}, onConnection = () => {}) {
     throw new TypeError('TLS server requires a credentials object');
   }
 
-  const { key, cert, requestCert = false } = credentials;
+  const {
+    key,
+    cert,
+    requestCert = false,
+    ca = undefined,
+    rejectUnauthorized = false,
+  } = credentials;
 
   if (!isKeyMaterial(key)) {
     throw new TypeError('TLS server requires a private key');
@@ -34,10 +46,20 @@ export function createTestTlsServer(credentials = {}, onConnection = () => {}) {
     throw new TypeError('TLS server requestCert flag must be a boolean');
   }
 
+  if (ca !== undefined) {
+    if (!Array.isArray(ca) || !ca.every(isKeyMaterial)) {
+      throw new TypeError('TLS server ca must be an array of certificates');
+    }
+  }
+
+  if (typeof rejectUnauthorized !== 'boolean') {
+    throw new TypeError('TLS server rejectUnauthorized flag must be a boolean');
+  }
+
   return new Promise((resolve, reject) => {
     let server;
     try {
-      server = tls.createServer({ key, cert, requestCert }, (socket) => {
+      server = tls.createServer({ key, cert, requestCert, ca, rejectUnauthorized }, (socket) => {
         onConnection(socket);
       });
     } catch (err) {
