@@ -11,15 +11,27 @@ import tls from 'node:tls';
  * @param {(socket: tls.TLSSocket) => void} [onConnection]
  * @returns {Promise<{server: tls.Server, port: number, close: () => Promise<void>}>}
  */
-export function createTestTlsServer(credentials, onConnection = () => {}) {
+export function createTestTlsServer(credentials = {}, onConnection = () => {}) {
+  if (typeof onConnection !== 'function') {
+    throw new TypeError('TLS server onConnection handler must be a function');
+  }
+
+  if (!credentials || typeof credentials !== 'object') {
+    throw new TypeError('TLS server requires a credentials object');
+  }
+
   const { key, cert, requestCert = false } = credentials;
 
-  if (!key) {
+  if (!isKeyMaterial(key)) {
     throw new TypeError('TLS server requires a private key');
   }
 
-  if (!cert) {
+  if (!isKeyMaterial(cert)) {
     throw new TypeError('TLS server requires a certificate');
+  }
+
+  if (typeof requestCert !== 'boolean') {
+    throw new TypeError('TLS server requestCert flag must be a boolean');
   }
 
   return new Promise((resolve, reject) => {
@@ -33,9 +45,18 @@ export function createTestTlsServer(credentials, onConnection = () => {}) {
       return;
     }
 
-    server.once('error', (err) => reject(err));
+    const removeErrorListener = () => server.removeListener('error', handleError);
+
+    const handleError = (err) => {
+      removeErrorListener();
+      reject(err);
+    };
+
+    server.once('error', handleError);
 
     server.listen(0, '127.0.0.1', () => {
+      removeErrorListener();
+
       const address = server.address();
       if (!address || typeof address === 'string') {
         reject(new Error('Unable to determine listening address for TLS test server'));
@@ -46,10 +67,21 @@ export function createTestTlsServer(credentials, onConnection = () => {}) {
         server,
         port: address.port,
         close: () =>
-          new Promise((closeResolve) => {
-            server.close(() => closeResolve());
+          new Promise((closeResolve, closeReject) => {
+            server.close((closeError) => {
+              if (closeError) {
+                closeReject(closeError);
+                return;
+              }
+
+              closeResolve();
+            });
           }),
       });
     });
   });
+}
+
+function isKeyMaterial(value) {
+  return typeof value === 'string' || Buffer.isBuffer(value);
 }
