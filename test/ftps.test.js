@@ -267,6 +267,15 @@ function handleExplicitConnection(socket, secureContext, credentials, { pasvAdve
       case 'AUTH': {
         sendLine('234 Proceed with negotiation.');
         if (usingTls) return;
+        socket.off('data', onData);
+        secureSocket = new tls.TLSSocket(socket, { secureContext, isServer: true });
+        secureSocket.once('secure', () => {
+          usingTls = true;
+          currentSocket = secureSocket;
+          buffer = Buffer.alloc(0);
+        });
+        secureSocket.on('data', onData);
+        secureSocket.once('error', cleanup);
         return;
       }
       case 'USER':
@@ -618,6 +627,38 @@ test('custom FTPS client logs commands and TLS handshake when verbose', async (t
   assert.ok(messages.some((msg) => msg.includes('ClientHello')), 'TLS ClientHello should be logged');
   assert.ok(messages.some((msg) => msg.includes('C->S USER test')), 'USER command should be logged');
   assert.ok(messages.some((msg) => msg.includes('S->C 230')), 'PASS response should be logged');
+});
+
+test('custom FTPS client upgrades from cleartext when secure is initially false', async (t) => {
+  const creds = await loadCredentials();
+  const server = await createExplicitFtpsServer(creds);
+  const messages = [];
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    secure: false,
+    verbose: true,
+    logger: (msg) => messages.push(msg),
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await client.connect();
+  await client.upgradeControlChannel();
+  await client.login('test', 'password');
+  await client.setProtectedDataChannel();
+
+  const pwdResp = await client.pwd();
+  assert.match(pwdResp, /^257/);
+  await client.quit();
+
+  assert.ok(messages.some((msg) => msg.includes('ClientHello')), 'TLS ClientHello should be logged during upgrade');
+  assert.ok(messages.some((msg) => msg.includes('ServerHello')), 'TLS ServerHello should be logged during upgrade');
 });
 
 test('custom FTPS client upgrades, downgrades, and continues over cleartext', async (t) => {

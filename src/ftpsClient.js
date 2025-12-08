@@ -93,9 +93,6 @@ export class FtpsClient extends EventEmitter {
     this.#log('Upgrading control channel to TLS');
     const authResp = await this.sendCommand('AUTH TLS');
     this.#assertCode(authResp, 234, 'AUTH TLS response');
-    if (!this.secure) {
-      return;
-    }
 
     this.tlsClient = await TlsClient.fromExistingSocket(this.socket, {
       servername: this.servername,
