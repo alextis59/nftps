@@ -12,6 +12,8 @@ export class FtpsClient extends EventEmitter {
     clientKey,
     secure = true,
     ignorePasvAddress = false,
+    verbose = false,
+    logger,
   } = {}) {
     super();
     this.host = host;
@@ -21,6 +23,8 @@ export class FtpsClient extends EventEmitter {
     this.clientKey = clientKey;
     this.secure = secure;
     this.ignorePasvAddress = ignorePasvAddress;
+    this.verbose = Boolean(verbose);
+    this.logger = typeof logger === 'function' ? logger : null;
 
     this.socket = null;
     this.tlsClient = null;
@@ -29,11 +33,18 @@ export class FtpsClient extends EventEmitter {
     this.dataProtection = secure ? 'P' : 'C';
   }
 
+  #log(message) {
+    if (!this.verbose) return;
+    const target = this.logger ?? console.debug;
+    target(message);
+  }
+
   async connect() {
     if (!this.host) {
       throw new TypeError('FtpsClient requires a host');
     }
 
+    this.#log(`Connecting to ${this.host}:${this.port} (secure=${this.secure})`);
     this.socket = net.connect({ host: this.host, port: this.port });
     await new Promise((resolve, reject) => {
       this.socket.once('error', reject);
@@ -45,7 +56,10 @@ export class FtpsClient extends EventEmitter {
         servername: this.servername,
         clientCert: this.clientCert,
         clientKey: this.clientKey,
+        verbose: this.verbose,
+        logger: this.logger,
       });
+      this.#log('Control channel secured with TLS');
     }
 
     const greeting = await this.#readLine();
@@ -76,6 +90,7 @@ export class FtpsClient extends EventEmitter {
       throw new Error('Control channel already secured');
     }
 
+    this.#log('Upgrading control channel to TLS');
     const authResp = await this.sendCommand('AUTH TLS');
     this.#assertCode(authResp, 234, 'AUTH TLS response');
     if (!this.secure) {
@@ -86,9 +101,12 @@ export class FtpsClient extends EventEmitter {
       servername: this.servername,
       clientCert: this.clientCert,
       clientKey: this.clientKey,
+      verbose: this.verbose,
+      logger: this.logger,
     });
     this.secure = true;
     this.secureBuffer = Buffer.alloc(0);
+    this.#log('Control channel secured with TLS');
   }
 
   async clearCommandChannel() {
@@ -186,6 +204,7 @@ export class FtpsClient extends EventEmitter {
   }
 
   async #sendOnly(command) {
+    this.#log(`C->S ${command}`);
     this.emit('command', command);
     if (this.tlsClient) {
       await this.tlsClient.sendApplicationData(Buffer.from(`${command}\r\n`, 'utf8'));
@@ -216,6 +235,7 @@ export class FtpsClient extends EventEmitter {
         this[bufferKey] = buf.subarray(newlineIndex + 1);
         const text = line.toString('utf8').replace(/\r?\n$/, '');
         this.emit('data', text);
+        this.#log(`S->C ${text}`);
         return text;
       }
 
@@ -226,6 +246,7 @@ export class FtpsClient extends EventEmitter {
 
   async #connectDataSocket(host, port) {
     if (this.dataProtection === 'P') {
+      this.#log(`Opening secure data connection to ${host}:${port}`);
       const socket = tls.connect({
         host,
         port,
@@ -233,12 +254,16 @@ export class FtpsClient extends EventEmitter {
         rejectUnauthorized: false,
       });
       await new Promise((resolve, reject) => {
-        socket.once('secureConnect', resolve);
+        socket.once('secureConnect', () => {
+          this.#log('Secure data connection established');
+          resolve();
+        });
         socket.once('error', reject);
       });
       return socket;
     }
 
+    this.#log(`Opening data connection to ${host}:${port}`);
     const socket = net.connect({ host, port });
     await new Promise((resolve, reject) => {
       socket.once('connect', resolve);
