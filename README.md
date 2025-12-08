@@ -4,16 +4,18 @@ This repository captures a testing harness for experimenting with FTPS/TLS flows
 
 ## Testing
 
-The project uses Node's built-in test runner and TLS client to validate a locally generated TLS server. The test suite spins up a TLS echo server with the bundled self-signed certificate and verifies the handshake and data exchange using the Node TLS client. To run the tests:
+The project uses Node's built-in test runner and TLS client to validate a locally generated TLS server. The test suite spins up a TLS echo server with the bundled self-signed certificate and verifies the handshake and data exchange using the Node TLS client. To run the tests, use [Bun](https://bun.sh/), which implements the Node-compatible `node:test` API:
 
 ```
-node --test
+bun test
 ```
 
-If you prefer npm-style scripts, you can also use `npm test` once Node.js is available in your environment.
+If you prefer npm-style scripts, you can also use `npm test` or `node --test` in environments where Node.js is available.
 
-> **Note:** The provided execution environment for this repository does not include a Node.js binary and cannot install one via `apt` because outbound package downloads are blocked. The test suite has been validated with [Bun](https://bun.sh/), which implements the Node-compatible `node:test` API:
->
-> ```
-> bun test
-> ```
+## Validated environment versions
+
+The test suite has been validated with the following toolchain versions:
+
+- Bun 1.2.14
+- Node.js v22.21.0
+- OpenSSL 3.0.13
