@@ -132,6 +132,33 @@ function deriveKeyBlock(masterSecret, serverRandom, clientRandom, length) {
   return tls12Prf(masterSecret, 'key expansion', seed, length);
 }
 
+function handshakeTypeName(type) {
+  switch (type) {
+    case 0x00:
+      return 'HelloRequest';
+    case 0x01:
+      return 'ClientHello';
+    case 0x02:
+      return 'ServerHello';
+    case 0x0b:
+      return 'Certificate';
+    case 0x0c:
+      return 'ServerKeyExchange';
+    case 0x0d:
+      return 'CertificateRequest';
+    case 0x0e:
+      return 'ServerHelloDone';
+    case 0x10:
+      return 'ClientKeyExchange';
+    case 0x0f:
+      return 'CertificateVerify';
+    case 0x14:
+      return 'Finished';
+    default:
+      return `Handshake 0x${type.toString(16)}`;
+  }
+}
+
 function buildClientHello(hostname) {
   const clientRandom = Buffer.alloc(32);
   clientRandom.writeUInt32BE(Math.floor(Date.now() / 1000), 0);
@@ -669,11 +696,13 @@ export class TlsRecordLayer {
 }
 
 export class TlsClient {
-  constructor(socket, hostname, clientCertChain = [], clientPrivateKey) {
+  constructor(socket, hostname, clientCertChain = [], clientPrivateKey, { verbose = false, logger } = {}) {
     this.socket = socket;
     this.hostname = hostname;
     this.clientCertChain = clientCertChain;
     this.clientPrivateKey = clientPrivateKey;
+    this.verbose = Boolean(verbose);
+    this.logger = typeof logger === 'function' ? logger : null;
 
     this.tcp = new TcpStream(socket);
     this.recordLayer = new TlsRecordLayer(this.tcp);
@@ -684,34 +713,42 @@ export class TlsClient {
     };
   }
 
-  static async connect({ host, port, servername = host, clientCert, clientKey }) {
+  #log(message) {
+    if (!this.verbose) return;
+    const target = this.logger ?? console.debug;
+    target(message);
+  }
+
+  static async connect({ host, port, servername = host, clientCert, clientKey, verbose = false, logger }) {
     const socket = net.connect({ host, port });
     await once(socket, 'connect');
     const chain = parsePemCertificateChain(clientCert);
     const privateKey = parsePrivateKey(clientKey);
-    const client = new TlsClient(socket, servername, chain, privateKey);
+    const client = new TlsClient(socket, servername, chain, privateKey, { verbose, logger });
     await client.doHandshake();
     return client;
   }
 
-  static async fromExistingSocket(socket, { servername = 'localhost', clientCert, clientKey } = {}) {
+  static async fromExistingSocket(socket, { servername = 'localhost', clientCert, clientKey, verbose = false, logger } = {}) {
     if (!socket || typeof socket.write !== 'function') {
       throw new TypeError('fromExistingSocket requires an active socket');
     }
 
     const chain = parsePemCertificateChain(clientCert);
     const privateKey = parsePrivateKey(clientKey);
-    const client = new TlsClient(socket, servername, chain, privateKey);
+    const client = new TlsClient(socket, servername, chain, privateKey, { verbose, logger });
     await client.doHandshake();
     return client;
   }
 
   async doHandshake() {
+    this.#log(`Starting TLS handshake with ${this.hostname}`);
     const { clientRandom, handshake: ch } = buildClientHello(this.hostname);
     this.clientRandom = clientRandom;
     this.handshakeTranscript.push(ch);
 
     await this.recordLayer.writePlainRecord(0x16, ch);
+    this.#log('-> ClientHello');
 
     let serverCertPem;
     let sawServerHello = false;
@@ -726,6 +763,7 @@ export class TlsClient {
         const serverHello = parseServerHello(msg.body);
         this.serverRandom = serverHello.random;
         sawServerHello = true;
+        this.#log('<= ServerHello');
 
         if (serverHello.version !== TLS_VERSION_1_2) {
           throw new Error(`Unsupported TLS version 0x${serverHello.version.toString(16)}`);
@@ -745,21 +783,24 @@ export class TlsClient {
         this.serverCertChain = chain;
         serverCertPem = derToPem(chain[0], 'CERTIFICATE');
         sawServerCert = true;
+        this.#log(`<= Certificate (${chain.length} certs)`);
         continue;
       }
 
       if (msg.type === 0x0d) {
         this.handshakeTranscript.push(msg.raw);
         certRequest = parseCertificateRequest(msg.body);
+        this.#log('<= CertificateRequest');
         continue;
       }
 
       if (msg.type === 0x0e) {
         this.handshakeTranscript.push(msg.raw);
+        this.#log('<= ServerHelloDone');
         break;
       }
 
-      throw new Error(`Unexpected handshake message type 0x${msg.type.toString(16)}`);
+      throw new Error(`Unexpected handshake message type ${handshakeTypeName(msg.type)}`);
     }
 
     if (!sawServerHello || !sawServerCert || !serverCertPem) {
@@ -788,11 +829,13 @@ export class TlsClient {
       const clientCertMsg = buildClientCertificate(this.clientCertChain);
       this.handshakeTranscript.push(clientCertMsg);
       await this.recordLayer.writePlainRecord(0x16, clientCertMsg);
+      this.#log('-> Certificate');
       sentClientCert = true;
     }
 
     this.handshakeTranscript.push(ckx);
     await this.recordLayer.writePlainRecord(0x16, ckx);
+    this.#log('-> ClientKeyExchange');
 
     this.masterSecret = deriveMasterSecret(this.preMasterSecret, this.clientRandom, this.serverRandom);
     const keyBlock = deriveKeyBlock(this.masterSecret, this.serverRandom, this.clientRandom, 104);
@@ -803,13 +846,16 @@ export class TlsClient {
       const certVerify = buildCertificateVerify(this.clientPrivateKey, this.handshakeTranscript);
       this.handshakeTranscript.push(certVerify);
       await this.recordLayer.writePlainRecord(0x16, certVerify);
+      this.#log('-> CertificateVerify');
     }
     await this.recordLayer.sendChangeCipherSpec();
+    this.#log('-> ChangeCipherSpec');
 
     const transcriptBuf = Buffer.concat(this.handshakeTranscript);
     const finished = buildFinished(this.masterSecret, transcriptBuf, true);
     await this.recordLayer.writeEncryptedRecord(0x16, finished);
     this.handshakeTranscript.push(finished);
+    this.#log('-> Finished');
 
     const ccs = await this.recordLayer.readPlainRecord();
     if (ccs.type === 0x15) {
@@ -818,12 +864,14 @@ export class TlsClient {
     if (ccs.type !== 0x14) {
       throw new Error(`Expected ChangeCipherSpec from server, got record type ${ccs.type}`);
     }
+    this.#log('<= ChangeCipherSpec');
 
     const srvFinishedRecord = await this.readHandshakeMessage(true);
     if (srvFinishedRecord.type !== 0x14) {
       throw new Error('Expected Finished from server');
     }
     const srvFinished = parseFinishedHandshake(srvFinishedRecord.raw);
+    this.#log('<= Finished');
 
     const transcriptForServer = Buffer.concat(this.handshakeTranscript);
     const expected = computeFinishedVerifyData(this.masterSecret, transcriptForServer, 'server finished');
@@ -832,6 +880,7 @@ export class TlsClient {
     }
 
     this.recordLayer.state = 'ENCRYPTED';
+    this.#log('TLS handshake complete');
   }
 
   async readHandshakeMessage(encrypted = false) {
@@ -879,6 +928,7 @@ export class TlsClient {
 
   async sendApplicationData(data) {
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    this.#log(`-> ApplicationData (${buf.length} bytes)`);
     await this.recordLayer.writeEncryptedRecord(0x17, buf);
   }
 
@@ -887,6 +937,7 @@ export class TlsClient {
     if (type !== 0x17) {
       throw new Error(`Expected ApplicationData, got record type ${type}`);
     }
+    this.#log(`<= ApplicationData (${fragment.length} bytes)`);
     return fragment;
   }
 

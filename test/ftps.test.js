@@ -592,6 +592,34 @@ test('custom FTPS client can ignore advertised PASV address', async (t) => {
   await client.quit();
 });
 
+test('custom FTPS client logs commands and TLS handshake when verbose', async (t) => {
+  const creds = await loadCredentials();
+  const server = await createFtpsServer(creds);
+  const messages = [];
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    verbose: true,
+    logger: (msg) => messages.push(msg),
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await client.connect();
+  await client.login('test', 'password');
+  await client.pwd();
+  await client.quit();
+
+  assert.ok(messages.some((msg) => msg.includes('ClientHello')), 'TLS ClientHello should be logged');
+  assert.ok(messages.some((msg) => msg.includes('C->S USER test')), 'USER command should be logged');
+  assert.ok(messages.some((msg) => msg.includes('S->C 230')), 'PASS response should be logged');
+});
+
 test('custom FTPS client upgrades, downgrades, and continues over cleartext', async (t) => {
   const creds = await loadCredentials();
   const server = await createExplicitFtpsServer(creds);

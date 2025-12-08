@@ -117,6 +117,32 @@ test('custom TLS client completes handshake and exchanges data', async (t) => {
   assert.strictEqual(response.toString('utf8'), 'ping');
 });
 
+test('custom TLS client logs handshake events in verbose mode', async (t) => {
+  const creds = await loadCredentials();
+  const messages = [];
+
+  const server = await createTestTlsServer(creds, (socket) => {
+    socket.on('data', (chunk) => socket.write(chunk));
+  });
+
+  const client = await TlsClient.connect({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    verbose: true,
+    logger: (msg) => messages.push(msg),
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  assert.ok(messages.some((msg) => msg.includes('ClientHello')), 'ClientHello should be logged');
+  assert.ok(messages.some((msg) => msg.includes('ServerHello')), 'ServerHello should be logged');
+  assert.ok(messages.some((msg) => msg.includes('TLS handshake complete')), 'handshake completion should be logged');
+});
+
 test('custom TLS client presents a certificate when required', async (t) => {
   const creds = await loadCredentials();
   const clientCreds = await loadClientCredentials();
