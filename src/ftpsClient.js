@@ -1,15 +1,28 @@
-import net from 'node:net';
-import { EventEmitter } from 'node:events';
-import { TlsClient } from './tlsClient.js';
+const net = require('node:net');
+const { EventEmitter } = require('node:events');
+const { TlsClient } = require('./tlsClient.js');
 
-export class FtpsClient extends EventEmitter {
-  constructor({ host, port = 21, servername = host, clientCert, clientKey, secure = true } = {}) {
+class FtpsClient extends EventEmitter {
+  constructor({
+    host,
+    port = 21,
+    servername = host,
+    clientCert,
+    clientKey,
+    ca,
+    rejectUnauthorized = true,
+    checkServerIdentity,
+    secure = true,
+  } = {}) {
     super();
     this.host = host;
     this.port = port;
     this.servername = servername || host || 'localhost';
     this.clientCert = clientCert;
     this.clientKey = clientKey;
+    this.ca = ca;
+    this.rejectUnauthorized = rejectUnauthorized;
+    this.checkServerIdentity = checkServerIdentity;
     this.secure = secure;
 
     this.socket = null;
@@ -34,6 +47,9 @@ export class FtpsClient extends EventEmitter {
         servername: this.servername,
         clientCert: this.clientCert,
         clientKey: this.clientKey,
+        ca: this.ca,
+        rejectUnauthorized: this.rejectUnauthorized,
+        checkServerIdentity: this.checkServerIdentity,
       });
     }
 
@@ -71,22 +87,41 @@ export class FtpsClient extends EventEmitter {
       servername: this.servername,
       clientCert: this.clientCert,
       clientKey: this.clientKey,
+      ca: this.ca,
+      rejectUnauthorized: this.rejectUnauthorized,
+      checkServerIdentity: this.checkServerIdentity,
     });
     this.secure = true;
     this.secureBuffer = Buffer.alloc(0);
   }
 
-  async clearCommandChannel() {
+  /**
+   * Send CCC on the control channel.
+   *
+   * By default we actively downgrade to cleartext on the same socket. Some
+   * Node-based test servers cannot unwrap TLSSocket back to raw TCP; for those
+   * environments pass `{ downgrade: false }` to keep using TLS after CCC.
+   */
+  async clearCommandChannel({
+    downgrade = true,
+    waitForPeerCloseNotify = true,
+    closeNotifyTimeoutMs = 5000,
+  } = {}) {
     if (!this.tlsClient) {
       return this.sendCommand('CCC');
     }
 
     const resp = await this.sendCommand('CCC');
     this.#assertCode(resp, 200, 'CCC response');
-    await this.tlsClient.close({ destroySocket: false });
-    this.tlsClient = null;
-    this.secure = false;
-    this.plainBuffer = Buffer.alloc(0);
+    if (downgrade) {
+      await this.tlsClient.shutdownToPlain({
+        waitForPeer: waitForPeerCloseNotify,
+        timeoutMs: closeNotifyTimeoutMs,
+      });
+      this.tlsClient = null;
+      this.secure = false;
+      this.plainBuffer = Buffer.alloc(0);
+    }
     return resp;
   }
 
@@ -165,3 +200,7 @@ export class FtpsClient extends EventEmitter {
     }
   }
 }
+
+module.exports = {
+  FtpsClient,
+};

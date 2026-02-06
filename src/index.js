@@ -1,9 +1,19 @@
-export { createTestTlsServer } from './tlsServer.js';
-export {
+const { createTestTlsServer } = require('./tlsServer.js');
+const {
   TcpStream,
   TLS_VERSION_1_2,
   TlsRecordLayer,
   TlsClient,
   makeCipherStateFromKeyBlock,
-} from './tlsClient.js';
-export { FtpsClient } from './ftpsClient.js';
+} = require('./tlsClient.js');
+const { FtpsClient } = require('./ftpsClient.js');
+
+module.exports = {
+  createTestTlsServer,
+  TcpStream,
+  TLS_VERSION_1_2,
+  TlsRecordLayer,
+  TlsClient,
+  makeCipherStateFromKeyBlock,
+  FtpsClient,
+};

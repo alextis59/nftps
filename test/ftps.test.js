@@ -1,69 +1,30 @@
-import test from 'node:test';
-import assert from 'node:assert';
-import net from 'node:net';
-import tls from 'node:tls';
-import { readFile } from 'node:fs/promises';
-import { once } from 'node:events';
-import { FtpsClient } from '../src/index.js';
+const test = require('node:test');
+const assert = require('node:assert');
+const tls = require('node:tls');
+const { once } = require('node:events');
+const { FtpsClient } = require('../src/index.js');
+const {
+  createCustomImplicitFtpsServer,
+  createCustomExplicitFtpsServer,
+} = require('../support/customImplicitFtpsServer.js');
+const { loadCertificateFixtures } = require('../support/testCertFixtures.js');
 
-const keyPath = new URL('../certs/server.key', import.meta.url);
-const certPath = new URL('../certs/server.crt', import.meta.url);
-
-async function loadCredentials() {
-  const [key, cert] = await Promise.all([
-    readFile(keyPath, 'utf8'),
-    readFile(certPath, 'utf8'),
-  ]);
-  return { key, cert };
-}
-
-async function createFtpsServer(credentials) {
-  const { key, cert } = credentials;
+async function createFtpsServer(credentials, onSecureConnection = () => {}) {
+  const { key, cert, ...rest } = credentials;
   const server = tls.createServer({
     key,
     cert,
+    ...rest,
     ciphers: 'AES128-SHA',
     honorCipherOrder: true,
     minVersion: 'TLSv1.2',
     maxVersion: 'TLSv1.2',
   });
 
-  server.on('secureConnection', (socket) => handleConnection(socket));
-
-  return await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address();
-      if (!addr || typeof addr === 'string') {
-        reject(new Error('Unable to determine FTPS server address'));
-        return;
-      }
-
-      server.off('error', reject);
-      resolve({
-        port: addr.port,
-        close: () =>
-          new Promise((closeResolve, closeReject) => {
-            server.close((err) => (err ? closeReject(err) : closeResolve()));
-          }),
-      });
-    });
+  server.on('secureConnection', (socket) => {
+    onSecureConnection(socket);
+    handleConnection(socket);
   });
-}
-
-async function createExplicitFtpsServer(credentials) {
-  const { key, cert } = credentials;
-  const secureContext = tls.createSecureContext({
-    key,
-    cert,
-    ciphers: 'AES128-SHA',
-    minVersion: 'TLSv1.2',
-    maxVersion: 'TLSv1.2',
-  });
-
-  const server = net.createServer();
-
-  server.on('connection', (socket) => handleExplicitConnection(socket, secureContext));
 
   return await new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -146,97 +107,6 @@ function handleConnection(socket) {
   sendLine('220 Test FTPS server ready');
 }
 
-function handleExplicitConnection(socket, secureContext) {
-  let loggedIn = false;
-  let buffer = Buffer.alloc(0);
-  let currentSocket = socket;
-  let secureSocket = null;
-  let usingTls = false;
-
-  const sendLine = (line) => currentSocket.write(`${line}\r\n`);
-  const cleanup = () => currentSocket.destroy();
-
-  const processCommand = (line) => {
-    const [command, ...rest] = line.trim().split(/\s+/);
-    const arg = rest.join(' ');
-
-    switch (command?.toUpperCase()) {
-      case 'AUTH': {
-        sendLine('234 Proceed with negotiation.');
-        if (usingTls) return;
-
-        socket.off('data', onData);
-        const tlsSocket = new tls.TLSSocket(socket, {
-          isServer: true,
-          secureContext,
-          honorCipherOrder: true,
-        });
-        usingTls = true;
-        secureSocket = tlsSocket;
-        buffer = Buffer.alloc(0);
-
-        tlsSocket.once('secure', () => {
-          currentSocket = tlsSocket;
-          tlsSocket.on('data', onData);
-        });
-        tlsSocket.once('error', cleanup);
-        return;
-      }
-      case 'USER':
-        sendLine('331 User name okay, need password.');
-        return;
-      case 'PASS':
-        loggedIn = true;
-        sendLine('230 User logged in, proceed.');
-        return;
-      case 'PBSZ':
-        sendLine('200 PBSZ set to 0.');
-        return;
-      case 'PROT':
-        sendLine('200 Protection level set to Clear.');
-        return;
-      case 'CCC':
-        sendLine('200 Command channel unprotected.');
-        if (usingTls && secureSocket) {
-          secureSocket.removeAllListeners('data');
-          currentSocket = socket;
-          buffer = Buffer.alloc(0);
-          usingTls = false;
-          socket.on('data', onData);
-        }
-        return;
-      case 'PWD':
-        if (!loggedIn) {
-          sendLine('530 Not logged in.');
-          return;
-        }
-        sendLine('257 "/" is current directory');
-        return;
-      case 'QUIT':
-        sendLine('221 Service closing control connection.');
-        currentSocket.end();
-        return;
-      default:
-        sendLine('502 Command not implemented');
-    }
-  };
-
-  const onData = (chunk) => {
-    buffer = Buffer.concat([buffer, chunk]);
-    while (true) {
-      const idx = buffer.indexOf(0x0a);
-      if (idx === -1) break;
-      const line = buffer.subarray(0, idx + 1).toString('utf8').replace(/\r?\n$/, '');
-      buffer = buffer.subarray(idx + 1);
-      processCommand(line);
-    }
-  };
-
-  socket.on('data', onData);
-  socket.once('error', cleanup);
-  sendLine('220 Explicit FTPS server ready');
-}
-
 function createLineReader(stream) {
   let buf = Buffer.alloc(0);
   return async () => {
@@ -253,15 +123,29 @@ function createLineReader(stream) {
   };
 }
 
+async function withTimeout(promise, label, ms = 4000) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timeout while waiting for ${label}`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 test('node FTPS client negotiates and logs in', async (t) => {
-  const creds = await loadCredentials();
-  const server = await createFtpsServer(creds);
+  const fixtures = await loadCertificateFixtures();
+  const server = await createFtpsServer({ key: fixtures.serverKey, cert: fixtures.serverCert });
 
   const client = tls.connect({
     host: '127.0.0.1',
     port: server.port,
     servername: 'localhost',
-    ca: [creds.cert],
+    ca: [fixtures.caCert],
     ciphers: 'AES128-SHA',
     minVersion: 'TLSv1.2',
     maxVersion: 'TLSv1.2',
@@ -304,10 +188,15 @@ test('node FTPS client negotiates and logs in', async (t) => {
 });
 
 test('custom FTPS client negotiates and logs in', async (t) => {
-  const creds = await loadCredentials();
-  const server = await createFtpsServer(creds);
+  const fixtures = await loadCertificateFixtures();
+  const server = await createFtpsServer({ key: fixtures.serverKey, cert: fixtures.serverCert });
 
-  const client = new FtpsClient({ host: '127.0.0.1', port: server.port, servername: 'localhost' });
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    ca: [fixtures.caCert],
+  });
   const received = [];
   const sent = [];
 
@@ -319,7 +208,7 @@ test('custom FTPS client negotiates and logs in', async (t) => {
     await server.close();
   });
 
-  await client.connect();
+  await withTimeout(client.connect(), 'connect and implicit TLS handshake');
   await client.login('test', 'password');
   await client.setProtectedDataChannel();
   const pwdResp = await client.pwd();
@@ -338,11 +227,17 @@ test('custom FTPS client negotiates and logs in', async (t) => {
   ]);
 });
 
-test('custom FTPS client upgrades, downgrades, and continues over cleartext', async (t) => {
-  const creds = await loadCredentials();
-  const server = await createExplicitFtpsServer(creds);
+test('custom FTPS client downgrades to clear TCP after explicit TLS shutdown', { timeout: 6000 }, async (t) => {
+  const fixtures = await loadCertificateFixtures();
+  const server = await createCustomImplicitFtpsServer({ key: fixtures.serverKey, cert: fixtures.serverCert });
 
-  const client = new FtpsClient({ host: '127.0.0.1', port: server.port, servername: 'localhost', secure: false });
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    secure: true,
+    ca: [fixtures.caCert],
+  });
   const sent = [];
   const received = [];
 
@@ -354,22 +249,83 @@ test('custom FTPS client upgrades, downgrades, and continues over cleartext', as
     await server.close();
   });
 
-  await client.connect();
-  await client.upgradeControlChannel();
-  await client.login('test', 'password');
+  await withTimeout(client.connect(), 'connect and implicit TLS handshake');
+  await withTimeout(client.login('test', 'password'), 'login');
+  const cccResp = await withTimeout(client.clearCommandChannel(), 'CCC downgrade');
+  assert.match(cccResp, /^200/);
+  assert.strictEqual(client.secure, false, 'client should switch to clear control channel');
+  assert.strictEqual(client.tlsClient, null, 'TLS client should be detached after downgrade');
 
-  const pbszResp = await client.sendCommand('PBSZ 0');
+  const pwdResp = await withTimeout(client.pwd(), 'PWD in clear mode');
+  assert.match(pwdResp, /^257/);
+  await withTimeout(client.quit(), 'QUIT in clear mode');
+  const shutdownStats = server.getStats();
+  assert.strictEqual(shutdownStats.sawClientCloseNotify, true, 'server should receive client close_notify');
+  assert.strictEqual(shutdownStats.sentServerCloseNotify, true, 'server should send server close_notify');
+
+  assert.deepStrictEqual(sent, [
+    'USER test',
+    'PASS password',
+    'CCC',
+    'PWD',
+    'QUIT',
+  ]);
+
+  assert.deepStrictEqual(received, [
+    '220 Custom implicit FTPS server ready',
+    '331 User name okay, need password.',
+    '230 User logged in, proceed.',
+    '200 Command channel unprotected.',
+    '257 "/" is current directory',
+    '221 Service closing control connection.',
+  ]);
+});
+
+test('custom FTPS client upgrades with AUTH TLS then downgrades to clear TCP', { timeout: 8000 }, async (t) => {
+  const fixtures = await loadCertificateFixtures();
+  const server = await createCustomExplicitFtpsServer({ key: fixtures.serverKey, cert: fixtures.serverCert });
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    secure: false,
+    ca: [fixtures.caCert],
+  });
+  const sent = [];
+  const received = [];
+
+  client.on('command', (cmd) => sent.push(cmd));
+  client.on('data', (line) => received.push(line));
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await withTimeout(client.connect(), 'plain FTP connect');
+  await withTimeout(client.upgradeControlChannel(), 'AUTH TLS upgrade');
+  assert.strictEqual(client.secure, true, 'client should switch to TLS after AUTH TLS');
+  assert.ok(client.tlsClient, 'TLS client should be present after upgrade');
+
+  await withTimeout(client.login('test', 'password'), 'login over TLS');
+  const pbszResp = await withTimeout(client.sendCommand('PBSZ 0'), 'PBSZ over TLS');
   assert.match(pbszResp, /^200/);
-
-  const protResp = await client.sendCommand('PROT C');
+  const protResp = await withTimeout(client.sendCommand('PROT C'), 'PROT C over TLS');
   assert.match(protResp, /^200/);
 
-  const cccResp = await client.clearCommandChannel();
+  const cccResp = await withTimeout(client.clearCommandChannel(), 'CCC downgrade');
   assert.match(cccResp, /^200/);
+  assert.strictEqual(client.secure, false, 'client should downgrade to clear channel after CCC');
+  assert.strictEqual(client.tlsClient, null, 'TLS client should be detached after downgrade');
 
-  const pwdResp = await client.pwd();
+  const pwdResp = await withTimeout(client.pwd(), 'PWD in clear mode after downgrade');
   assert.match(pwdResp, /^257/);
-  await client.quit();
+  await withTimeout(client.quit(), 'QUIT in clear mode after downgrade');
+
+  const shutdownStats = server.getStats();
+  assert.strictEqual(shutdownStats.sawClientCloseNotify, true, 'server should receive client close_notify');
+  assert.strictEqual(shutdownStats.sentServerCloseNotify, true, 'server should send server close_notify');
 
   assert.deepStrictEqual(sent, [
     'AUTH TLS',
@@ -383,7 +339,7 @@ test('custom FTPS client upgrades, downgrades, and continues over cleartext', as
   ]);
 
   assert.deepStrictEqual(received, [
-    '220 Explicit FTPS server ready',
+    '220 Custom explicit FTPS server ready',
     '234 Proceed with negotiation.',
     '331 User name okay, need password.',
     '230 User logged in, proceed.',
@@ -393,4 +349,69 @@ test('custom FTPS client upgrades, downgrades, and continues over cleartext', as
     '257 "/" is current directory',
     '221 Service closing control connection.',
   ]);
+});
+
+test('custom FTPS client presents client certificate when required', async (t) => {
+  const fixtures = await loadCertificateFixtures();
+
+  let resolveServerAuth;
+  const serverAuth = new Promise((resolve) => {
+    resolveServerAuth = resolve;
+  });
+
+  const server = await createFtpsServer(
+    {
+      key: fixtures.serverKey,
+      cert: fixtures.serverCert,
+      requestCert: true,
+      ca: [fixtures.caCert],
+      rejectUnauthorized: true,
+    },
+    (socket) => {
+      const peer = socket.getPeerCertificate(true);
+      resolveServerAuth(socket.authorized && peer?.subject?.CN === 'ftps-client');
+    },
+  );
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    ca: [fixtures.caCert],
+    clientCert: fixtures.clientCert,
+    clientKey: fixtures.clientKey,
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await withTimeout(client.connect(), 'connect over TLS with client certificate');
+  await withTimeout(client.login('test', 'password'), 'login');
+  const serverAuthorized = await serverAuth;
+  assert.strictEqual(serverAuthorized, true, 'server should accept the client certificate');
+  await withTimeout(client.quit(), 'quit');
+});
+
+test('custom FTPS client rejects server with untrusted CA', async (t) => {
+  const fixtures = await loadCertificateFixtures();
+
+  const server = await createFtpsServer({ key: fixtures.serverKey, cert: fixtures.serverCert });
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    ca: [fixtures.wrongCaCert],
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await assert.rejects(
+    () => withTimeout(client.connect(), 'connect with wrong CA'),
+    /trusted CA/i,
+  );
 });

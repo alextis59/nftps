@@ -4,16 +4,32 @@ This repository captures a testing harness for experimenting with FTPS/TLS flows
 
 ## Testing
 
-The project uses Node's built-in test runner and TLS client to validate a locally generated TLS server. The test suite spins up a TLS echo server with the bundled self-signed certificate and verifies the handshake and data exchange using the Node TLS client. To run the tests:
+The project uses Node's built-in test runner and TLS client to validate TLS and FTPS flows, including certificate validation and explicit FTPS TLS downgrade (`CCC`). To run the tests:
 
 ```
 node --test
 ```
 
-If you prefer npm-style scripts, you can also use `npm test` once Node.js is available in your environment.
+You can also run:
 
-> **Note:** The provided execution environment for this repository does not include a Node.js binary and cannot install one via `apt` because outbound package downloads are blocked. The test suite has been validated with [Bun](https://bun.sh/), which implements the Node-compatible `node:test` API:
->
-> ```
-> bun test
-> ```
+```
+npm test
+```
+
+## FTPS Notes
+
+- `FtpsClient.clearCommandChannel()` now supports two modes:
+  - Default: `clearCommandChannel()` sends TLS `close_notify`, waits for peer `close_notify`, then downgrades the control channel to cleartext on the same TCP socket.
+  - Optional compatibility: `clearCommandChannel({ downgrade: false })` sends `CCC` but keeps TLS active.
+- Test coverage includes both:
+  - implicit FTPS (`secure: true`) with `CCC` downgrade to cleartext
+  - explicit FTPS (`secure: false` + `AUTH TLS`) with `CCC` downgrade to cleartext
+
+## Certificate Support
+
+- `TlsClient` and `FtpsClient` support:
+  - server certificate + hostname verification
+  - custom CA trust via `ca`
+  - client authentication via `clientCert` + `clientKey`
+  - optional bypass with `rejectUnauthorized: false`
+- Test fixtures in `test/fixtures/pki` provide a CA root, server cert, client cert, and a wrong CA for negative tests.

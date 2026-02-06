@@ -1,21 +1,24 @@
-import net from 'node:net';
-import crypto from 'node:crypto';
-import { once } from 'node:events';
+const net = require('node:net');
+const crypto = require('node:crypto');
+const tls = require('node:tls');
+const { once } = require('node:events');
 
 /**
  * Minimal buffered TCP helper used by the TLS record layer to read exact byte
  * counts off a socket.
  */
-export class TcpStream {
+class TcpStream {
   #buffer = Buffer.alloc(0);
+  #onData;
   /**
    * @param {net.Socket} socket
    */
   constructor(socket) {
     this.socket = socket;
-    socket.on('data', (chunk) => {
+    this.#onData = (chunk) => {
       this.#buffer = Buffer.concat([this.#buffer, chunk]);
-    });
+    };
+    socket.on('data', this.#onData);
   }
 
   /**
@@ -34,16 +37,28 @@ export class TcpStream {
 
     while (this.#buffer.length < n) {
       await new Promise((resolve, reject) => {
-        const onError = (err) => {
+        const cleanup = () => {
+          this.socket.off('error', onError);
+          this.socket.off('end', onClose);
+          this.socket.off('close', onClose);
           this.socket.off('data', onData);
+        };
+        const onError = (err) => {
+          cleanup();
           reject(err);
         };
+        const onClose = () => {
+          cleanup();
+          reject(new Error('Socket closed while waiting for TLS record bytes'));
+        };
         const onData = () => {
-          this.socket.off('error', onError);
+          cleanup();
           resolve();
         };
 
         this.socket.once('error', onError);
+        this.socket.once('end', onClose);
+        this.socket.once('close', onClose);
         this.socket.once('data', onData);
       });
     }
@@ -69,9 +84,16 @@ export class TcpStream {
       });
     });
   }
+
+  detach() {
+    if (this.#onData) {
+      this.socket.off('data', this.#onData);
+      this.#onData = null;
+    }
+  }
 }
 
-export const TLS_VERSION_1_2 = 0x0303;
+const TLS_VERSION_1_2 = 0x0303;
 
 /**
  * @typedef {"PLAIN" | "ENCRYPTING" | "ENCRYPTED" | "CLOSED"} TlsState
@@ -147,20 +169,26 @@ function buildClientHello(hostname) {
 
   const hostBuf = Buffer.from(hostname, 'ascii');
   const serverNameListLen = 1 + 2 + hostBuf.length;
-  const extData = Buffer.alloc(2 + serverNameListLen);
-  extData.writeUInt16BE(serverNameListLen, 0);
-  extData.writeUInt8(0x00, 2);
-  extData.writeUInt16BE(hostBuf.length, 3);
-  hostBuf.copy(extData, 5);
+  const sniData = Buffer.alloc(2 + serverNameListLen);
+  sniData.writeUInt16BE(serverNameListLen, 0);
+  sniData.writeUInt8(0x00, 2);
+  sniData.writeUInt16BE(hostBuf.length, 3);
+  hostBuf.copy(sniData, 5);
 
-  const sniExt = Buffer.alloc(4 + extData.length);
-  sniExt.writeUInt16BE(0x0000, 0);
-  sniExt.writeUInt16BE(extData.length, 2);
-  extData.copy(sniExt, 4);
+  // signature_algorithms (TLS 1.2)
+  // Keep the list short: rsa_pkcs1_sha256 and rsa_pkcs1_sha1.
+  const sigAlgsData = Buffer.alloc(2 + 4);
+  sigAlgsData.writeUInt16BE(4, 0);
+  sigAlgsData.writeUInt8(0x04, 2);
+  sigAlgsData.writeUInt8(0x01, 3);
+  sigAlgsData.writeUInt8(0x02, 4);
+  sigAlgsData.writeUInt8(0x01, 5);
 
-  const extensions = Buffer.alloc(2 + sniExt.length);
-  extensions.writeUInt16BE(sniExt.length, 0);
-  sniExt.copy(extensions, 2);
+  const extBlocks = [buildExtension(0x0000, sniData), buildExtension(0x000d, sigAlgsData)];
+  const extPayload = Buffer.concat(extBlocks);
+  const extensions = Buffer.alloc(2 + extPayload.length);
+  extensions.writeUInt16BE(extPayload.length, 0);
+  extPayload.copy(extensions, 2);
 
   const body = Buffer.concat([
     Buffer.from([0x03, 0x03]),
@@ -178,6 +206,14 @@ function buildClientHello(hostname) {
   const handshake = Buffer.concat([header, body]);
 
   return { clientRandom, handshake };
+}
+
+function buildExtension(type, data) {
+  const ext = Buffer.alloc(4 + data.length);
+  ext.writeUInt16BE(type, 0);
+  ext.writeUInt16BE(data.length, 2);
+  data.copy(ext, 4);
+  return ext;
 }
 
 function parseServerHello(body) {
@@ -272,13 +308,218 @@ function pemToDer(pem, label) {
 function parsePemCertificateChain(certPem) {
   if (certPem === undefined) return [];
 
-  const text = Buffer.isBuffer(certPem) ? certPem.toString('utf8') : String(certPem);
-  const matches = text.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
-  if (!matches || matches.length === 0) {
-    throw new Error('Client certificate must contain at least one CERTIFICATE block');
+  const matches = extractCertificatePemBlocks(certPem, 'clientCert');
+  return matches.map((block) => pemToDer(block, 'CERTIFICATE'));
+}
+
+function extractCertificatePemBlocks(value, fieldName) {
+  if (typeof value !== 'string' && !Buffer.isBuffer(value)) {
+    throw new TypeError(`${fieldName} must be a string or Buffer`);
   }
 
-  return matches.map((block) => pemToDer(block, 'CERTIFICATE'));
+  const text = Buffer.isBuffer(value) ? value.toString('utf8') : String(value);
+  const matches = text.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g);
+  if (!matches || matches.length === 0) {
+    throw new Error(`${fieldName} must contain at least one CERTIFICATE block`);
+  }
+
+  return matches;
+}
+
+function parseCaCertificates(ca) {
+  if (ca === undefined) {
+    return undefined;
+  }
+
+  const entries = Array.isArray(ca) ? ca : [ca];
+  const certs = [];
+  for (const entry of entries) {
+    const certBlocks = extractCertificatePemBlocks(entry, 'ca');
+    for (const block of certBlocks) {
+      certs.push(new crypto.X509Certificate(block));
+    }
+  }
+  return certs;
+}
+
+let cachedDefaultCaCertificates;
+function getDefaultCaCertificates() {
+  if (!cachedDefaultCaCertificates) {
+    cachedDefaultCaCertificates = tls.rootCertificates.map((pem) => new crypto.X509Certificate(pem));
+  }
+  return cachedDefaultCaCertificates;
+}
+
+function assertCertificateTimeValid(cert, context) {
+  const now = new Date();
+  if (now < cert.validFromDate || now > cert.validToDate) {
+    throw new Error(
+      `${context} certificate is not valid at ${now.toISOString()} (${cert.validFromDate.toISOString()} - ${cert.validToDate.toISOString()})`,
+    );
+  }
+}
+
+function isSignedBy(certificate, issuer) {
+  try {
+    return certificate.checkIssued(issuer) && certificate.verify(issuer.publicKey);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeServerIdentityResult(hostname, leaf, checkServerIdentity) {
+  if (!hostname) {
+    return;
+  }
+
+  const legacyCert = leaf.toLegacyObject();
+  legacyCert.raw = leaf.raw;
+  const maybeError = checkServerIdentity(hostname, legacyCert);
+  if (maybeError instanceof Error) {
+    throw maybeError;
+  }
+}
+
+function verifyServerCertificateChain({
+  chainDer,
+  hostname,
+  caCertificates,
+  checkServerIdentity = tls.checkServerIdentity,
+}) {
+  if (!Array.isArray(chainDer) || chainDer.length === 0) {
+    throw new Error('Server did not present a certificate chain');
+  }
+
+  const presented = chainDer.map((der) => new crypto.X509Certificate(der));
+  const leaf = presented[0];
+  normalizeServerIdentityResult(hostname, leaf, checkServerIdentity);
+
+  const trustStore = caCertificates === undefined ? getDefaultCaCertificates() : caCertificates;
+  if (!Array.isArray(trustStore) || trustStore.length === 0) {
+    throw new Error('No trusted CA certificates available for server validation');
+  }
+
+  const trustedFingerprints = new Set(trustStore.map((cert) => cert.fingerprint256));
+  const visited = new Set();
+  let current = leaf;
+
+  while (true) {
+    assertCertificateTimeValid(current, 'Server');
+    if (trustedFingerprints.has(current.fingerprint256)) {
+      return;
+    }
+
+    visited.add(current.fingerprint256);
+
+    const issuerFromPresented = presented.find(
+      (candidate) =>
+        candidate.ca === true &&
+        !visited.has(candidate.fingerprint256) &&
+        candidate.fingerprint256 !== current.fingerprint256 &&
+        isSignedBy(current, candidate),
+    );
+
+    if (issuerFromPresented) {
+      current = issuerFromPresented;
+      continue;
+    }
+
+    const issuerFromTrustStore = trustStore.find((candidate) => isSignedBy(current, candidate));
+    if (issuerFromTrustStore) {
+      assertCertificateTimeValid(issuerFromTrustStore, 'Trusted CA');
+      return;
+    }
+
+    throw new Error('Server certificate chain is not signed by a trusted CA');
+  }
+}
+
+function validateServerAuthOptions({ rejectUnauthorized, checkServerIdentity }) {
+  if (typeof rejectUnauthorized !== 'boolean') {
+    throw new TypeError('rejectUnauthorized must be a boolean');
+  }
+
+  if (checkServerIdentity !== undefined && typeof checkServerIdentity !== 'function') {
+    throw new TypeError('checkServerIdentity must be a function');
+  }
+}
+
+function parseConnectionOptions({
+  servername,
+  clientCert,
+  clientKey,
+  ca,
+  rejectUnauthorized = true,
+  checkServerIdentity,
+}) {
+  validateServerAuthOptions({ rejectUnauthorized, checkServerIdentity });
+
+  return {
+    servername,
+    clientCertChain: parsePemCertificateChain(clientCert),
+    clientPrivateKey: parsePrivateKey(clientKey),
+    caCertificates: parseCaCertificates(ca),
+    rejectUnauthorized,
+    checkServerIdentity: checkServerIdentity || tls.checkServerIdentity,
+  };
+}
+
+function parseServerCertificate(serverCertDer) {
+  if (!Buffer.isBuffer(serverCertDer)) {
+    throw new TypeError('server certificate must be a Buffer');
+  }
+  return derToPem(serverCertDer, 'CERTIFICATE');
+}
+
+function ensureClientCertificateMatchesKey(clientCertChain, clientPrivateKey) {
+  if (clientCertChain.length === 0 || !clientPrivateKey) {
+    return;
+  }
+
+  const leafCert = new crypto.X509Certificate(derToPem(clientCertChain[0], 'CERTIFICATE'));
+  const key = crypto.createPrivateKey(clientPrivateKey);
+  if (!leafCert.checkPrivateKey(key)) {
+    throw new Error('clientCert and clientKey do not match');
+  }
+}
+
+function ensureClientAuthMaterial(clientCertChain, clientPrivateKey) {
+  if (clientCertChain.length > 0 && !clientPrivateKey) {
+    throw new Error('clientKey is required when clientCert is provided');
+  }
+  if (clientPrivateKey && clientCertChain.length === 0) {
+    throw new Error('clientCert is required when clientKey is provided');
+  }
+  ensureClientCertificateMatchesKey(clientCertChain, clientPrivateKey);
+}
+
+function ensureServerName(servername) {
+  if (typeof servername !== 'string' || servername.length === 0) {
+    throw new TypeError('servername must be a non-empty string');
+  }
+}
+
+function ensureSocketConnected(socket) {
+  if (!socket || typeof socket.write !== 'function') {
+    throw new TypeError('fromExistingSocket requires an active socket');
+  }
+}
+
+function ensureHostAndPort(host, port) {
+  if (typeof host !== 'string' || host.length === 0) {
+    throw new TypeError('host must be a non-empty string');
+  }
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new TypeError('port must be an integer between 1 and 65535');
+  }
+}
+
+function extractLegacyPublicServerCert(chainDer) {
+  if (!Array.isArray(chainDer) || chainDer.length === 0) {
+    throw new Error('Server certificate chain is empty');
+  }
+
+  return parseServerCertificate(chainDer[0]);
 }
 
 function parsePrivateKey(keyPem) {
@@ -454,7 +695,7 @@ function parseCertificateRequest(body) {
  * @param {Buffer} keyBlock
  * @returns {CipherState}
  */
-export function makeCipherStateFromKeyBlock(keyBlock) {
+function makeCipherStateFromKeyBlock(keyBlock) {
   if (!Buffer.isBuffer(keyBlock)) {
     throw new TypeError('keyBlock must be a Buffer');
   }
@@ -484,7 +725,7 @@ export function makeCipherStateFromKeyBlock(keyBlock) {
   };
 }
 
-export class TlsRecordLayer {
+class TlsRecordLayer {
   state = 'PLAIN';
   version = TLS_VERSION_1_2;
 
@@ -668,12 +909,27 @@ export class TlsRecordLayer {
   }
 }
 
-export class TlsClient {
-  constructor(socket, hostname, clientCertChain = [], clientPrivateKey) {
+class TlsClient {
+  constructor(
+    socket,
+    hostname,
+    {
+      clientCertChain = [],
+      clientPrivateKey,
+      caCertificates,
+      rejectUnauthorized = true,
+      checkServerIdentity = tls.checkServerIdentity,
+    } = {},
+  ) {
     this.socket = socket;
     this.hostname = hostname;
     this.clientCertChain = clientCertChain;
     this.clientPrivateKey = clientPrivateKey;
+    this.caCertificates = caCertificates;
+    this.rejectUnauthorized = rejectUnauthorized;
+    this.checkServerIdentity = checkServerIdentity;
+    this.authorized = false;
+    this.authorizationError = null;
 
     this.tcp = new TcpStream(socket);
     this.recordLayer = new TlsRecordLayer(this.tcp);
@@ -684,26 +940,73 @@ export class TlsClient {
     };
   }
 
-  static async connect({ host, port, servername = host, clientCert, clientKey }) {
+  static async connect({
+    host,
+    port,
+    servername = host,
+    clientCert,
+    clientKey,
+    ca,
+    rejectUnauthorized = true,
+    checkServerIdentity,
+  }) {
+    ensureHostAndPort(host, port);
+    ensureServerName(servername);
+
+    const options = parseConnectionOptions({
+      servername,
+      clientCert,
+      clientKey,
+      ca,
+      rejectUnauthorized,
+      checkServerIdentity,
+    });
+    ensureClientAuthMaterial(options.clientCertChain, options.clientPrivateKey);
+
     const socket = net.connect({ host, port });
     await once(socket, 'connect');
-    const chain = parsePemCertificateChain(clientCert);
-    const privateKey = parsePrivateKey(clientKey);
-    const client = new TlsClient(socket, servername, chain, privateKey);
-    await client.doHandshake();
-    return client;
+    const client = new TlsClient(socket, servername, options);
+    try {
+      await client.doHandshake();
+      return client;
+    } catch (err) {
+      await client.close({ destroySocket: true, sendCloseNotify: false, detach: true }).catch(() => {});
+      throw err;
+    }
   }
 
-  static async fromExistingSocket(socket, { servername = 'localhost', clientCert, clientKey } = {}) {
-    if (!socket || typeof socket.write !== 'function') {
-      throw new TypeError('fromExistingSocket requires an active socket');
-    }
+  static async fromExistingSocket(
+    socket,
+    {
+      servername = 'localhost',
+      clientCert,
+      clientKey,
+      ca,
+      rejectUnauthorized = true,
+      checkServerIdentity,
+    } = {},
+  ) {
+    ensureSocketConnected(socket);
+    ensureServerName(servername);
 
-    const chain = parsePemCertificateChain(clientCert);
-    const privateKey = parsePrivateKey(clientKey);
-    const client = new TlsClient(socket, servername, chain, privateKey);
-    await client.doHandshake();
-    return client;
+    const options = parseConnectionOptions({
+      servername,
+      clientCert,
+      clientKey,
+      ca,
+      rejectUnauthorized,
+      checkServerIdentity,
+    });
+    ensureClientAuthMaterial(options.clientCertChain, options.clientPrivateKey);
+
+    const client = new TlsClient(socket, servername, options);
+    try {
+      await client.doHandshake();
+      return client;
+    } catch (err) {
+      await client.close({ destroySocket: true, sendCloseNotify: false, detach: true }).catch(() => {});
+      throw err;
+    }
   }
 
   async doHandshake() {
@@ -743,7 +1046,7 @@ export class TlsClient {
         this.handshakeTranscript.push(msg.raw);
         const chain = parseCertificate(msg.body);
         this.serverCertChain = chain;
-        serverCertPem = derToPem(chain[0], 'CERTIFICATE');
+        serverCertPem = extractLegacyPublicServerCert(chain);
         sawServerCert = true;
         continue;
       }
@@ -764,6 +1067,23 @@ export class TlsClient {
 
     if (!sawServerHello || !sawServerCert || !serverCertPem) {
       throw new Error('Incomplete server handshake messages');
+    }
+
+    if (this.rejectUnauthorized) {
+      try {
+        verifyServerCertificateChain({
+          chainDer: this.serverCertChain,
+          hostname: this.hostname,
+          caCertificates: this.caCertificates,
+          checkServerIdentity: this.checkServerIdentity,
+        });
+        this.authorized = true;
+        this.authorizationError = null;
+      } catch (err) {
+        this.authorized = false;
+        this.authorizationError = err;
+        throw err;
+      }
     }
 
     this.preMasterSecret = buildPreMasterSecret();
@@ -890,13 +1210,81 @@ export class TlsClient {
     return fragment;
   }
 
-  async close({ destroySocket = true } = {}) {
+  async shutdownToPlain({ waitForPeer = true, timeoutMs = 5000 } = {}) {
+    if (this.recordLayer.state === 'CLOSED') {
+      this.tcp.detach();
+      return this.socket;
+    }
+
+    if (this.recordLayer.state !== 'PLAIN') {
+      await this.recordLayer.sendAlertCloseNotify();
+      if (waitForPeer) {
+        await this.#waitForPeerCloseNotify(timeoutMs);
+      }
+    }
+
+    this.recordLayer.state = 'CLOSED';
+    this.tcp.detach();
+    return this.socket;
+  }
+
+  async #waitForPeerCloseNotify(timeoutMs) {
+    while (true) {
+      const record = await this.#withTimeout(
+        this.recordLayer.readEncryptedRecord(),
+        timeoutMs,
+        'Timed out waiting for peer close_notify alert',
+      );
+
+      if (record.type !== 0x15) {
+        continue;
+      }
+
+      if (record.fragment.length < 2) {
+        throw new Error('Received malformed TLS alert while waiting for close_notify');
+      }
+
+      const level = record.fragment.readUInt8(0);
+      const description = record.fragment.readUInt8(1);
+
+      if (description === 0x00) {
+        return;
+      }
+
+      if (level === 0x02) {
+        throw new Error(`Received fatal TLS alert 0x${description.toString(16)} during shutdown`);
+      }
+    }
+  }
+
+  async #withTimeout(promise, timeoutMs, message) {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new TypeError('timeoutMs must be a positive number');
+    }
+
+    let timer;
     try {
-      if (this.recordLayer.state !== 'CLOSED') {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async close({ destroySocket = true, sendCloseNotify = true, detach = true } = {}) {
+    try {
+      if (sendCloseNotify && this.recordLayer.state !== 'CLOSED') {
         await this.recordLayer.sendAlertCloseNotify();
       }
     } finally {
       this.recordLayer.state = 'CLOSED';
+      if (detach) {
+        this.tcp.detach();
+      }
       if (destroySocket) {
         this.socket.destroy();
       }
@@ -904,3 +1292,10 @@ export class TlsClient {
   }
 }
 
+module.exports = {
+  TcpStream,
+  TLS_VERSION_1_2,
+  makeCipherStateFromKeyBlock,
+  TlsRecordLayer,
+  TlsClient,
+};

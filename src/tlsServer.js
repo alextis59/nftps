@@ -1,4 +1,4 @@
-import tls from 'node:tls';
+const tls = require('node:tls');
 
 /**
  * Spin up a simple TLS server for test scenarios.
@@ -17,7 +17,7 @@ import tls from 'node:tls';
  * @param {(socket: tls.TLSSocket) => void} [onConnection]
  * @returns {Promise<{server: tls.Server, port: number, close: () => Promise<void>}>}
  */
-export function createTestTlsServer(credentials = {}, onConnection = () => {}) {
+function createTestTlsServer(credentials = {}, onConnection = () => {}) {
   if (typeof onConnection !== 'function') {
     throw new TypeError('TLS server onConnection handler must be a function');
   }
@@ -107,3 +107,7 @@ export function createTestTlsServer(credentials = {}, onConnection = () => {}) {
 function isKeyMaterial(value) {
   return typeof value === 'string' || Buffer.isBuffer(value);
 }
+
+module.exports = {
+  createTestTlsServer,
+};

@@ -1,35 +1,14 @@
-import test from 'node:test';
-import assert from 'node:assert';
-import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
-import tls from 'node:tls';
-import { createTestTlsServer, TlsClient } from '../src/index.js';
-
-const keyPath = new URL('../certs/server.key', import.meta.url);
-const certPath = new URL('../certs/server.crt', import.meta.url);
-const clientKeyPath = new URL('../certs/client.key', import.meta.url);
-const clientCertPath = new URL('../certs/client.crt', import.meta.url);
-
-async function loadCredentials() {
-  const [key, cert] = await Promise.all([
-    readFile(keyPath, 'utf8'),
-    readFile(certPath, 'utf8'),
-  ]);
-  return { key, cert };
-}
-
-async function loadClientCredentials() {
-  const [key, cert] = await Promise.all([
-    readFile(clientKeyPath, 'utf8'),
-    readFile(clientCertPath, 'utf8'),
-  ]);
-  return { key, cert };
-}
+const test = require('node:test');
+const assert = require('node:assert');
+const { once } = require('node:events');
+const tls = require('node:tls');
+const { createTestTlsServer, TlsClient } = require('../src/index.js');
+const { loadCertificateFixtures } = require('../support/testCertFixtures.js');
 
 test('node TLS client completes handshake and exchanges data', async (t) => {
-  const creds = await loadCredentials();
+  const fixtures = await loadCertificateFixtures();
 
-  const server = await createTestTlsServer(creds, (socket) => {
+  const server = await createTestTlsServer({ key: fixtures.serverKey, cert: fixtures.serverCert }, (socket) => {
     socket.on('data', (chunk) => socket.write(chunk));
   });
 
@@ -37,7 +16,7 @@ test('node TLS client completes handshake and exchanges data', async (t) => {
     host: '127.0.0.1',
     port: server.port,
     servername: 'localhost',
-    ca: [creds.cert],
+    ca: [fixtures.caCert],
   });
 
   t.after(async () => {
@@ -46,7 +25,7 @@ test('node TLS client completes handshake and exchanges data', async (t) => {
   });
 
   await once(client, 'secureConnect');
-  assert.strictEqual(client.authorized, true, 'self-signed CA should authorize connection');
+  assert.strictEqual(client.authorized, true, 'configured CA should authorize connection');
 
   client.write('ping');
   const [response] = await once(client, 'data');
@@ -58,15 +37,25 @@ test('node TLS client presents a certificate when required', async (t) => {
     return;
   }
 
-  const creds = await loadCredentials();
-  const clientCreds = await loadClientCredentials();
+  const fixtures = await loadCertificateFixtures();
 
-  let serverAuthorized = false;
+  let resolveServerAuth;
+  const serverAuth = new Promise((resolve) => {
+    resolveServerAuth = resolve;
+  });
+
   const server = await createTestTlsServer(
-    { ...creds, requestCert: true, ca: [creds.cert], rejectUnauthorized: true },
+    {
+      key: fixtures.serverKey,
+      cert: fixtures.serverCert,
+      requestCert: true,
+      ca: [fixtures.caCert],
+      rejectUnauthorized: true,
+    },
     (socket) => {
       const peer = socket.getPeerCertificate(true);
-      serverAuthorized = peer?.subject?.CN === 'client';
+      const accepted = socket.authorized && peer?.subject?.CN === 'ftps-client';
+      resolveServerAuth(accepted);
       socket.on('data', (chunk) => socket.write(chunk));
     },
   );
@@ -75,9 +64,9 @@ test('node TLS client presents a certificate when required', async (t) => {
     host: '127.0.0.1',
     port: server.port,
     servername: 'localhost',
-    ca: [creds.cert],
-    cert: clientCreds.cert,
-    key: clientCreds.key,
+    ca: [fixtures.caCert],
+    cert: fixtures.clientCert,
+    key: fixtures.clientKey,
   });
 
   t.after(async () => {
@@ -86,7 +75,8 @@ test('node TLS client presents a certificate when required', async (t) => {
   });
 
   await once(client, 'secureConnect');
-  assert.strictEqual(client.authorized, true, 'self-signed CA should authorize connection');
+  const serverAuthorized = await serverAuth;
+  assert.strictEqual(client.authorized, true, 'configured CA should authorize connection');
   assert.strictEqual(serverAuthorized, true, 'server should accept presented client certificate');
 
   client.write('ping');
@@ -95,9 +85,9 @@ test('node TLS client presents a certificate when required', async (t) => {
 });
 
 test('custom TLS client completes handshake and exchanges data', async (t) => {
-  const creds = await loadCredentials();
+  const fixtures = await loadCertificateFixtures();
 
-  const server = await createTestTlsServer(creds, (socket) => {
+  const server = await createTestTlsServer({ key: fixtures.serverKey, cert: fixtures.serverCert }, (socket) => {
     socket.on('data', (chunk) => socket.write(chunk));
   });
 
@@ -105,6 +95,7 @@ test('custom TLS client completes handshake and exchanges data', async (t) => {
     host: '127.0.0.1',
     port: server.port,
     servername: 'localhost',
+    ca: [fixtures.caCert],
   });
 
   t.after(async () => {
@@ -118,15 +109,20 @@ test('custom TLS client completes handshake and exchanges data', async (t) => {
 });
 
 test('custom TLS client presents a certificate when required', async (t) => {
-  const creds = await loadCredentials();
-  const clientCreds = await loadClientCredentials();
+  const fixtures = await loadCertificateFixtures();
 
   let serverAuthorized = false;
   const server = await createTestTlsServer(
-    { ...creds, requestCert: true, ca: [creds.cert], rejectUnauthorized: true },
+    {
+      key: fixtures.serverKey,
+      cert: fixtures.serverCert,
+      requestCert: true,
+      ca: [fixtures.caCert],
+      rejectUnauthorized: true,
+    },
     (socket) => {
       const peer = socket.getPeerCertificate(true);
-      serverAuthorized = peer?.subject?.CN === 'client';
+      serverAuthorized = socket.authorized && peer?.subject?.CN === 'ftps-client';
       socket.on('data', (chunk) => socket.write(chunk));
     },
   );
@@ -135,8 +131,9 @@ test('custom TLS client presents a certificate when required', async (t) => {
     host: '127.0.0.1',
     port: server.port,
     servername: 'localhost',
-    clientCert: clientCreds.cert,
-    clientKey: clientCreds.key,
+    ca: [fixtures.caCert],
+    clientCert: fixtures.clientCert,
+    clientKey: fixtures.clientKey,
   });
 
   t.after(async () => {
@@ -147,6 +144,70 @@ test('custom TLS client presents a certificate when required', async (t) => {
   await client.sendApplicationData(Buffer.from('ping'));
   const response = await client.readApplicationData();
   assert.strictEqual(serverAuthorized, true, 'server should accept presented client certificate');
+  assert.strictEqual(response.toString('utf8'), 'ping');
+});
+
+test('custom TLS client rejects server with untrusted CA', async (t) => {
+  const fixtures = await loadCertificateFixtures();
+
+  const server = await createTestTlsServer({ key: fixtures.serverKey, cert: fixtures.serverCert });
+  t.after(async () => {
+    await server.close();
+  });
+
+  await assert.rejects(
+    () =>
+      TlsClient.connect({
+        host: '127.0.0.1',
+        port: server.port,
+        servername: 'localhost',
+        ca: [fixtures.wrongCaCert],
+      }),
+    /trusted CA/i,
+  );
+});
+
+test('custom TLS client rejects server hostname mismatch', async (t) => {
+  const fixtures = await loadCertificateFixtures();
+
+  const server = await createTestTlsServer({ key: fixtures.serverKey, cert: fixtures.serverCert });
+  t.after(async () => {
+    await server.close();
+  });
+
+  await assert.rejects(
+    () =>
+      TlsClient.connect({
+        host: '127.0.0.1',
+        port: server.port,
+        servername: 'not-localhost',
+        ca: [fixtures.caCert],
+      }),
+    /does not match certificate/,
+  );
+});
+
+test('custom TLS client can skip CA validation when rejectUnauthorized is false', async (t) => {
+  const fixtures = await loadCertificateFixtures();
+
+  const server = await createTestTlsServer({ key: fixtures.serverKey, cert: fixtures.serverCert }, (socket) => {
+    socket.on('data', (chunk) => socket.write(chunk));
+  });
+  const client = await TlsClient.connect({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    ca: [fixtures.wrongCaCert],
+    rejectUnauthorized: false,
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await client.sendApplicationData(Buffer.from('ping'));
+  const response = await client.readApplicationData();
   assert.strictEqual(response.toString('utf8'), 'ping');
 });
 
