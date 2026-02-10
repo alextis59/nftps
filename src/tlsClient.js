@@ -94,6 +94,21 @@ class TcpStream {
 }
 
 const TLS_VERSION_1_2 = 0x0303;
+const TLS_RSA_WITH_AES_128_CBC_SHA = 0x002f;
+const TLS_RSA_WITH_AES_128_CBC_SHA256 = 0x003c;
+
+const CIPHER_SPECS = {
+  [TLS_RSA_WITH_AES_128_CBC_SHA]: {
+    macAlgorithm: 'sha1',
+    macKeyLength: 20,
+    macLength: 20,
+  },
+  [TLS_RSA_WITH_AES_128_CBC_SHA256]: {
+    macAlgorithm: 'sha256',
+    macKeyLength: 32,
+    macLength: 32,
+  },
+};
 
 /**
  * @typedef {"PLAIN" | "ENCRYPTING" | "ENCRYPTED" | "CLOSED"} TlsState
@@ -161,9 +176,12 @@ function buildClientHello(hostname) {
 
   const sessionId = Buffer.from([0x00]);
 
-  const cipherSuites = Buffer.alloc(4);
-  cipherSuites.writeUInt16BE(2, 0);
-  cipherSuites.writeUInt16BE(0x002f, 2);
+  const offeredCipherSuites = [TLS_RSA_WITH_AES_128_CBC_SHA256, TLS_RSA_WITH_AES_128_CBC_SHA];
+  const cipherSuites = Buffer.alloc(2 + offeredCipherSuites.length * 2);
+  cipherSuites.writeUInt16BE(offeredCipherSuites.length * 2, 0);
+  for (let i = 0; i < offeredCipherSuites.length; i += 1) {
+    cipherSuites.writeUInt16BE(offeredCipherSuites[i], 2 + i * 2);
+  }
 
   const compressionMethods = Buffer.from([0x01, 0x00]);
 
@@ -695,19 +713,33 @@ function parseCertificateRequest(body) {
  * @param {Buffer} keyBlock
  * @returns {CipherState}
  */
-function makeCipherStateFromKeyBlock(keyBlock) {
+function makeCipherStateFromKeyBlock(keyBlock, cipherSpec = CIPHER_SPECS[TLS_RSA_WITH_AES_128_CBC_SHA]) {
   if (!Buffer.isBuffer(keyBlock)) {
     throw new TypeError('keyBlock must be a Buffer');
   }
+  if (!cipherSpec || typeof cipherSpec !== 'object') {
+    throw new TypeError('cipherSpec must be an object');
+  }
 
-  const REQUIRED = 104;
+  const { macKeyLength, macAlgorithm, macLength } = cipherSpec;
+  if (!Number.isInteger(macKeyLength) || macKeyLength <= 0) {
+    throw new TypeError('cipherSpec.macKeyLength must be a positive integer');
+  }
+  if (typeof macAlgorithm !== 'string' || macAlgorithm.length === 0) {
+    throw new TypeError('cipherSpec.macAlgorithm must be a non-empty string');
+  }
+  if (!Number.isInteger(macLength) || macLength <= 0) {
+    throw new TypeError('cipherSpec.macLength must be a positive integer');
+  }
+
+  const REQUIRED = macKeyLength * 2 + 16 + 16 + 16 + 16;
   if (keyBlock.length < REQUIRED) {
     throw new Error(`keyBlock must be at least ${REQUIRED} bytes`);
   }
 
   let offset = 0;
-  const clientWriteMacKey = keyBlock.subarray(offset, (offset += 20));
-  const serverWriteMacKey = keyBlock.subarray(offset, (offset += 20));
+  const clientWriteMacKey = keyBlock.subarray(offset, (offset += macKeyLength));
+  const serverWriteMacKey = keyBlock.subarray(offset, (offset += macKeyLength));
   const clientWriteKey = keyBlock.subarray(offset, (offset += 16));
   const serverWriteKey = keyBlock.subarray(offset, (offset += 16));
   const clientWriteIV = keyBlock.subarray(offset, (offset += 16));
@@ -720,6 +752,8 @@ function makeCipherStateFromKeyBlock(keyBlock) {
     serverWriteKey,
     clientWriteIV,
     serverWriteIV,
+    macAlgorithm,
+    macLength,
     clientSeqNum: 0n,
     serverSeqNum: 0n,
   };
@@ -818,7 +852,7 @@ class TlsRecordLayer {
     headerForMac.writeUInt16BE(plaintext.length, 3);
 
     const macInput = Buffer.concat([seqBuf, headerForMac, plaintext]);
-    const mac = crypto.createHmac('sha1', c.clientWriteMacKey).update(macInput).digest();
+    const mac = crypto.createHmac(c.macAlgorithm, c.clientWriteMacKey).update(macInput).digest();
 
     let plain = Buffer.concat([plaintext, mac]);
     const blockSize = 16;
@@ -883,12 +917,12 @@ class TlsRecordLayer {
     }
     plain = plain.subarray(0, plain.length - totalPadLen);
 
-    if (plain.length < 20) {
-      throw new Error('Plaintext too short to contain HMAC-SHA1');
+    if (plain.length < c.macLength) {
+      throw new Error('Plaintext too short to contain record MAC');
     }
 
-    const content = plain.subarray(0, plain.length - 20);
-    const macRecv = plain.subarray(plain.length - 20);
+    const content = plain.subarray(0, plain.length - c.macLength);
+    const macRecv = plain.subarray(plain.length - c.macLength);
 
     const seqBuf = Buffer.alloc(8);
     seqBuf.writeBigUInt64BE(seqNum);
@@ -898,7 +932,7 @@ class TlsRecordLayer {
     headerForMac.writeUInt16BE(content.length, 3);
 
     const macInput = Buffer.concat([seqBuf, headerForMac, content]);
-    const macExpected = crypto.createHmac('sha1', c.serverWriteMacKey).update(macInput).digest();
+    const macExpected = crypto.createHmac(c.macAlgorithm, c.serverWriteMacKey).update(macInput).digest();
 
     if (!crypto.timingSafeEqual(macRecv, macExpected)) {
       throw new Error('TLS MAC verification failed');
@@ -938,6 +972,8 @@ class TlsClient {
       plain: Buffer.alloc(0),
       encrypted: Buffer.alloc(0),
     };
+    this.selectedCipherSuite = null;
+    this.cipherSpec = null;
   }
 
   static async connect({
@@ -1028,12 +1064,13 @@ class TlsClient {
         this.handshakeTranscript.push(msg.raw);
         const serverHello = parseServerHello(msg.body);
         this.serverRandom = serverHello.random;
+        this.selectedCipherSuite = serverHello.cipherSuite;
         sawServerHello = true;
 
         if (serverHello.version !== TLS_VERSION_1_2) {
           throw new Error(`Unsupported TLS version 0x${serverHello.version.toString(16)}`);
         }
-        if (serverHello.cipherSuite !== 0x002f) {
+        if (!CIPHER_SPECS[serverHello.cipherSuite]) {
           throw new Error(`Server selected unsupported cipher suite 0x${serverHello.cipherSuite.toString(16)}`);
         }
         if (serverHello.compression !== 0x00) {
@@ -1115,8 +1152,10 @@ class TlsClient {
     await this.recordLayer.writePlainRecord(0x16, ckx);
 
     this.masterSecret = deriveMasterSecret(this.preMasterSecret, this.clientRandom, this.serverRandom);
-    const keyBlock = deriveKeyBlock(this.masterSecret, this.serverRandom, this.clientRandom, 104);
-    const cipherState = makeCipherStateFromKeyBlock(keyBlock);
+    this.cipherSpec = CIPHER_SPECS[this.selectedCipherSuite];
+    const keyBlockLength = this.cipherSpec.macKeyLength * 2 + 16 + 16 + 16 + 16;
+    const keyBlock = deriveKeyBlock(this.masterSecret, this.serverRandom, this.clientRandom, keyBlockLength);
+    const cipherState = makeCipherStateFromKeyBlock(keyBlock, this.cipherSpec);
     this.recordLayer.installCipher(cipherState);
 
     if (sentClientCert) {
