@@ -108,6 +108,40 @@ test('custom TLS client completes handshake and exchanges data', async (t) => {
   assert.strictEqual(response.toString('utf8'), 'ping');
 });
 
+
+test('custom TLS client supports TLS_RSA_WITH_AES_128_CBC_SHA256', async (t) => {
+  const fixtures = await loadCertificateFixtures();
+
+  const server = await createTestTlsServer(
+    {
+      key: fixtures.serverKey,
+      cert: fixtures.serverCert,
+      ciphers: 'AES128-SHA256',
+      minVersion: 'TLSv1.2',
+      maxVersion: 'TLSv1.2',
+    },
+    (socket) => {
+      socket.on('data', (chunk) => socket.write(chunk));
+    },
+  );
+
+  const client = await TlsClient.connect({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    ca: [fixtures.caCert],
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await client.sendApplicationData(Buffer.from('ping'));
+  const response = await client.readApplicationData();
+  assert.strictEqual(response.toString('utf8'), 'ping');
+});
+
 test('custom TLS client presents a certificate when required', async (t) => {
   const fixtures = await loadCertificateFixtures();
 

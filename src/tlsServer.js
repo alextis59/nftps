@@ -13,6 +13,9 @@ const tls = require('node:tls');
  *   requestCert?: boolean,
  *   ca?: Array<Buffer|string>,
  *   rejectUnauthorized?: boolean,
+ *   ciphers?: string,
+ *   minVersion?: string,
+ *   maxVersion?: string,
  * }} credentials
  * @param {(socket: tls.TLSSocket) => void} [onConnection]
  * @returns {Promise<{server: tls.Server, port: number, close: () => Promise<void>}>}
@@ -32,6 +35,9 @@ function createTestTlsServer(credentials = {}, onConnection = () => {}) {
     requestCert = false,
     ca = undefined,
     rejectUnauthorized = false,
+    ciphers = undefined,
+    minVersion = undefined,
+    maxVersion = undefined,
   } = credentials;
 
   if (!isKeyMaterial(key)) {
@@ -56,12 +62,37 @@ function createTestTlsServer(credentials = {}, onConnection = () => {}) {
     throw new TypeError('TLS server rejectUnauthorized flag must be a boolean');
   }
 
+  if (ciphers !== undefined && typeof ciphers !== 'string') {
+    throw new TypeError('TLS server ciphers must be a string');
+  }
+
+  if (minVersion !== undefined && typeof minVersion !== 'string') {
+    throw new TypeError('TLS server minVersion must be a string');
+  }
+
+  if (maxVersion !== undefined && typeof maxVersion !== 'string') {
+    throw new TypeError('TLS server maxVersion must be a string');
+  }
+
   return new Promise((resolve, reject) => {
     let server;
     try {
-      server = tls.createServer({ key, cert, requestCert, ca, rejectUnauthorized }, (socket) => {
-        onConnection(socket);
-      });
+      server = tls.createServer(
+        {
+          key,
+          cert,
+          requestCert,
+          ca,
+          rejectUnauthorized,
+          ciphers,
+          minVersion,
+          maxVersion,
+          honorCipherOrder: true,
+        },
+        (socket) => {
+          onConnection(socket);
+        },
+      );
     } catch (err) {
       reject(err);
       return;
