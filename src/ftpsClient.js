@@ -32,13 +32,15 @@ class FtpsClient extends EventEmitter {
     this.ignorePasvAddress = ignorePasvAddress;
 
     this.socket = null;
+    this.passiveDataSocket = null;
     this.tlsClient = null;
     this.secureBuffer = Buffer.alloc(0);
     this.plainBuffer = Buffer.alloc(0);
+    this.passiveBuffer = Buffer.alloc(0);
   }
 
   async enterPassiveMode({ ignoreAddress = this.ignorePasvAddress } = {}) {
-    const resp = await this.sendCommand('PASV');
+    const resp = await this.#sendControlCommand('PASV');
     this.#assertCode(resp, 227, 'PASV response');
 
     const endpoint = this.#parsePasvResponse(resp);
@@ -46,17 +48,33 @@ class FtpsClient extends EventEmitter {
       endpoint.host = this.host;
     }
 
+    await this.#openPassiveSocket(endpoint);
     return endpoint;
   }
 
   async openPassiveDataSocket(options = {}) {
-    const { host, port } = await this.enterPassiveMode(options);
+    if (this.passiveDataSocket && !this.passiveDataSocket.destroyed) {
+      return this.passiveDataSocket;
+    }
+
+    const endpoint = await this.enterPassiveMode(options);
+    return this.passiveDataSocket || this.#openPassiveSocket(endpoint);
+  }
+
+  async exitPassiveMode({ closeSocket = true } = {}) {
+    const socket = this.passiveDataSocket;
+    this.passiveDataSocket = null;
+    this.passiveBuffer = Buffer.alloc(0);
+
+    if (!socket || socket.destroyed || !closeSocket) {
+      return;
+    }
+
     return await new Promise((resolve, reject) => {
-      const dataSocket = net.connect({ host, port });
-      dataSocket.once('error', reject);
-      dataSocket.once('connect', () => {
-        dataSocket.off('error', reject);
-        resolve(dataSocket);
+      socket.once('error', reject);
+      socket.end(() => {
+        socket.off('error', reject);
+        resolve();
       });
     });
   }
@@ -179,6 +197,7 @@ class FtpsClient extends EventEmitter {
         await this.tlsClient.close();
       }
     } finally {
+      await this.exitPassiveMode();
       this.tlsClient = null;
       if (this.socket) {
         this.socket.destroy();
@@ -189,7 +208,11 @@ class FtpsClient extends EventEmitter {
 
   async sendCommand(command) {
     this.emit('command', command);
-    if (this.tlsClient) {
+    if (this.passiveDataSocket) {
+      await new Promise((resolve, reject) => {
+        this.passiveDataSocket.write(`${command}\r\n`, (err) => (err ? reject(err) : resolve()));
+      });
+    } else if (this.tlsClient) {
       await this.tlsClient.sendApplicationData(Buffer.from(`${command}\r\n`, 'utf8'));
     } else if (this.socket) {
       await new Promise((resolve, reject) => {
@@ -203,6 +226,11 @@ class FtpsClient extends EventEmitter {
   }
 
   async #readLine() {
+    if (this.passiveDataSocket) {
+      return this.#readLineFromSource('passiveBuffer', async () =>
+        new Promise((resolve) => this.passiveDataSocket.once('data', resolve)),
+      );
+    }
     if (this.tlsClient) {
       return this.#readLineFromSource('secureBuffer', async () => this.tlsClient.readApplicationData());
     }
@@ -245,6 +273,42 @@ class FtpsClient extends EventEmitter {
       host: `${h1}.${h2}.${h3}.${h4}`,
       port: Number.parseInt(p1, 10) * 256 + Number.parseInt(p2, 10),
     };
+  }
+
+  async #sendControlCommand(command) {
+    if (this.passiveDataSocket) {
+      return this.#runWithoutPassiveMode(() => this.sendCommand(command));
+    }
+    return this.sendCommand(command);
+  }
+
+  async #openPassiveSocket({ host, port }) {
+    await this.exitPassiveMode();
+
+    this.passiveDataSocket = await new Promise((resolve, reject) => {
+      const dataSocket = net.connect({ host, port });
+      dataSocket.once('error', reject);
+      dataSocket.once('connect', () => {
+        dataSocket.off('error', reject);
+        resolve(dataSocket);
+      });
+    });
+    this.passiveBuffer = Buffer.alloc(0);
+    return this.passiveDataSocket;
+  }
+
+  async #runWithoutPassiveMode(callback) {
+    const socket = this.passiveDataSocket;
+    const buffer = this.passiveBuffer;
+    this.passiveDataSocket = null;
+    this.passiveBuffer = Buffer.alloc(0);
+
+    try {
+      return await callback();
+    } finally {
+      this.passiveDataSocket = socket;
+      this.passiveBuffer = buffer;
+    }
   }
 }
 

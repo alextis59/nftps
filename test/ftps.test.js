@@ -418,7 +418,21 @@ test('custom FTPS client rejects server with untrusted CA', async (t) => {
 });
 
 test('custom FTPS client parses PASV and can ignore server-advertised address', async (t) => {
+  let dataConnectionCount = 0;
   const dataServer = net.createServer();
+  dataServer.on('connection', (socket) => {
+    dataConnectionCount += 1;
+    socket.on('data', (chunk) => {
+      const input = chunk.toString('utf8');
+      if (input.includes('PWD')) {
+        socket.write('257 "/" is current directory\r\n');
+      }
+      if (input.includes('QUIT')) {
+        socket.write('221 Goodbye from passive data channel\r\n');
+      }
+    });
+  });
+
   await new Promise((resolve, reject) => {
     dataServer.once('error', reject);
     dataServer.listen(0, '127.0.0.1', resolve);
@@ -471,17 +485,30 @@ test('custom FTPS client parses PASV and can ignore server-advertised address', 
 
   const endpointWithDefaultIgnore = await client.enterPassiveMode();
   assert.deepStrictEqual(endpointWithDefaultIgnore, { host: '127.0.0.1', port: dataAddress.port });
+  assert.strictEqual(dataConnectionCount, 1, 'enterPassiveMode should open passive data socket');
 
-  const endpointWithoutIgnore = await client.enterPassiveMode({ ignoreAddress: false });
-  assert.deepStrictEqual(endpointWithoutIgnore, { host: '10.0.0.1', port: dataAddress.port });
+  const pwdResp = await client.pwd();
+  assert.match(pwdResp, /^257/);
 
-  const accepted = once(dataServer, 'connection');
+  await client.exitPassiveMode();
+
+  await assert.rejects(
+    () => client.enterPassiveMode({ ignoreAddress: false }),
+    /ENETUNREACH/,
+    'enterPassiveMode should try the advertised PASV host when ignoreAddress is false',
+  );
+
+  const reenteredEndpoint = await client.enterPassiveMode();
+  assert.deepStrictEqual(reenteredEndpoint, { host: '127.0.0.1', port: dataAddress.port });
+  assert.strictEqual(dataConnectionCount, 2, 'enterPassiveMode should reconnect passive data socket');
+
   const dataSocket = await client.openPassiveDataSocket();
-  const [acceptedSocket] = await accepted;
-
+  assert.ok(dataSocket && !dataSocket.destroyed, 'openPassiveDataSocket should return the active passive socket');
   assert.strictEqual(dataSocket.remoteAddress, '127.0.0.1');
-  acceptedSocket.destroy();
-  dataSocket.destroy();
+
+  const passiveQuitResp = await client.sendCommand('QUIT');
+  assert.match(passiveQuitResp, /^221/);
+  await client.exitPassiveMode();
 
   await client.quit();
 });
