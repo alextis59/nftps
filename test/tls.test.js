@@ -109,6 +109,31 @@ test('custom TLS client completes handshake and exchanges data', async (t) => {
 });
 
 
+
+
+test('custom TLS client emits handshake logs in verbose mode', async (t) => {
+  const fixtures = await loadCertificateFixtures();
+
+  const server = await createTestTlsServer({ key: fixtures.serverKey, cert: fixtures.serverCert });
+  const logs = [];
+  const client = await TlsClient.connect({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    ca: [fixtures.caCert],
+    verbose: true,
+    log: (line) => logs.push(line),
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  assert.ok(logs.some((line) => line.includes('starting TLS 1.2 handshake')));
+  assert.ok(logs.some((line) => line.includes('received ServerHello')));
+  assert.ok(logs.some((line) => line.includes('TLS handshake completed successfully')));
+});
 test('custom TLS client supports TLS_RSA_WITH_AES_128_CBC_SHA256', async (t) => {
   const fixtures = await loadCertificateFixtures();
 

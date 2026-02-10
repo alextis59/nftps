@@ -32,4 +32,5 @@ npm test
   - custom CA trust via `ca`
   - client authentication via `clientCert` + `clientKey`
   - optional bypass with `rejectUnauthorized: false`
+  - handshake troubleshooting logs via `verbose: true` (override output sink with `log: (line) => {}`)
 - Test fixtures in `test/fixtures/pki` provide a CA root, server cert, client cert, and a wrong CA for negative tests.
