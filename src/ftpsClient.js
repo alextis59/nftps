@@ -12,6 +12,8 @@ class FtpsClient extends EventEmitter {
     ca,
     rejectUnauthorized = true,
     checkServerIdentity,
+    verbose = false,
+    log,
     secure = true,
   } = {}) {
     super();
@@ -23,6 +25,8 @@ class FtpsClient extends EventEmitter {
     this.ca = ca;
     this.rejectUnauthorized = rejectUnauthorized;
     this.checkServerIdentity = checkServerIdentity;
+    this.verbose = verbose;
+    this.log = log;
     this.secure = secure;
 
     this.socket = null;
@@ -50,6 +54,8 @@ class FtpsClient extends EventEmitter {
         ca: this.ca,
         rejectUnauthorized: this.rejectUnauthorized,
         checkServerIdentity: this.checkServerIdentity,
+        verbose: this.verbose,
+        log: this.log,
       });
     }
 
@@ -90,6 +96,8 @@ class FtpsClient extends EventEmitter {
       ca: this.ca,
       rejectUnauthorized: this.rejectUnauthorized,
       checkServerIdentity: this.checkServerIdentity,
+      verbose: this.verbose,
+      log: this.log,
     });
     this.secure = true;
     this.secureBuffer = Buffer.alloc(0);
