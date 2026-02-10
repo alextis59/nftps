@@ -208,6 +208,7 @@ class FtpsClient extends EventEmitter {
 
   async sendCommand(command) {
     this.emit('command', command);
+    this.#verboseLog(`sent control command: ${JSON.stringify(command)}`);
     if (this.passiveDataSocket) {
       await new Promise((resolve, reject) => {
         this.passiveDataSocket.write(`${command}\r\n`, (err) => (err ? reject(err) : resolve()));
@@ -248,6 +249,7 @@ class FtpsClient extends EventEmitter {
         this[bufferKey] = buf.subarray(newlineIndex + 1);
         const text = line.toString('utf8').replace(/\r?\n$/, '');
         this.emit('data', text);
+        this.#verboseLog(`received ${this.#sourceName(bufferKey)} data: ${JSON.stringify(text)}`);
         return text;
       }
 
@@ -260,6 +262,26 @@ class FtpsClient extends EventEmitter {
     if (!line || !line.startsWith(String(expected))) {
       throw new Error(`${context} failed: expected ${expected}, got "${line}"`);
     }
+  }
+
+  #sourceName(bufferKey) {
+    switch (bufferKey) {
+      case 'passiveBuffer':
+        return 'passive';
+      case 'secureBuffer':
+        return 'secure control';
+      default:
+        return 'plain control';
+    }
+  }
+
+  #verboseLog(message) {
+    if (!this.verbose) {
+      return;
+    }
+
+    const sink = typeof this.log === 'function' ? this.log : console.log;
+    sink(`[ftps-client:${this.servername}] ${message}`);
   }
 
   #parsePasvResponse(line) {

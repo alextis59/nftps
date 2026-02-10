@@ -192,11 +192,14 @@ test('custom FTPS client negotiates and logs in', async (t) => {
   const fixtures = await loadCertificateFixtures();
   const server = await createFtpsServer({ key: fixtures.serverKey, cert: fixtures.serverCert });
 
+  const verboseLogs = [];
   const client = new FtpsClient({
     host: '127.0.0.1',
     port: server.port,
     servername: 'localhost',
     ca: [fixtures.caCert],
+    verbose: true,
+    log: (line) => verboseLogs.push(line),
   });
   const received = [];
   const sent = [];
@@ -226,6 +229,8 @@ test('custom FTPS client negotiates and logs in', async (t) => {
     '257 "/" is current directory',
     '221 Service closing control connection.',
   ]);
+  assert.ok(verboseLogs.some((line) => line.includes('sent control command: "USER test"')));
+  assert.ok(verboseLogs.some((line) => line.includes('received secure control data: "230 User logged in, proceed."')));
 });
 
 test('custom FTPS client downgrades to clear TCP after explicit TLS shutdown', { timeout: 6000 }, async (t) => {

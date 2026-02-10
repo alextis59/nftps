@@ -527,6 +527,12 @@ function defaultVerboseLogger(message) {
   console.log(message);
 }
 
+function formatVerboseBuffer(buffer) {
+  const text = buffer.toString('utf8').replace(/[\r\n]/g, '\\n');
+  const preview = text.length > 80 ? `${text.slice(0, 80)}…` : text;
+  return JSON.stringify(preview);
+}
+
 function ensureHostAndPort(host, port) {
   if (typeof host !== 'string' || host.length === 0) {
     throw new TypeError('host must be a non-empty string');
@@ -1285,6 +1291,7 @@ class TlsClient {
 
   async sendApplicationData(data) {
     const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    this.#verboseLog(`sent application data (${buf.length} bytes): ${formatVerboseBuffer(buf)}`);
     await this.recordLayer.writeEncryptedRecord(0x17, buf);
   }
 
@@ -1293,6 +1300,7 @@ class TlsClient {
     if (type !== 0x17) {
       throw new Error(`Expected ApplicationData, got record type ${type}`);
     }
+    this.#verboseLog(`received application data (${fragment.length} bytes): ${formatVerboseBuffer(fragment)}`);
     return fragment;
   }
 
