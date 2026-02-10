@@ -27,6 +27,8 @@ npm test
 - Passive mode (`PASV`) support:
   - `enterPassiveMode()` parses `227` responses and returns `{ host, port }`
   - `openPassiveDataSocket()` connects to the announced passive data endpoint
+  - commands/replies stay on the control channel after entering passive mode; data-transfer payloads (for example `RETR`) arrive on the passive data socket
+  - passive data bytes are emitted via `passive-data` events and included in verbose logs as `received passive data: ...`
   - set `ignorePasvAddress: true` to use the control-channel host instead of the server-advertised PASV address (useful for NAT/broken servers)
 
 ## Certificate Support

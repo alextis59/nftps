@@ -424,17 +424,13 @@ test('custom FTPS client rejects server with untrusted CA', async (t) => {
 
 test('custom FTPS client parses PASV and can ignore server-advertised address', async (t) => {
   let dataConnectionCount = 0;
+  const dataSocketInputs = [];
   const dataServer = net.createServer();
   dataServer.on('connection', (socket) => {
     dataConnectionCount += 1;
     socket.on('data', (chunk) => {
       const input = chunk.toString('utf8');
-      if (input.includes('PWD')) {
-        socket.write('257 "/" is current directory\r\n');
-      }
-      if (input.includes('QUIT')) {
-        socket.write('221 Goodbye from passive data channel\r\n');
-      }
+      dataSocketInputs.push(input);
     });
   });
 
@@ -456,6 +452,9 @@ test('custom FTPS client parses PASV and can ignore server-advertised address', 
       const input = chunk.toString('utf8');
       if (input.includes('PASV')) {
         socket.write(`227 Entering Passive Mode (10,0,0,1,${p1},${p2})\r\n`);
+      }
+      if (input.includes('PWD')) {
+        socket.write('257 "/" is current directory\r\n');
       }
       if (input.includes('QUIT')) {
         socket.write('221 Goodbye\r\n');
@@ -511,9 +510,183 @@ test('custom FTPS client parses PASV and can ignore server-advertised address', 
   assert.ok(dataSocket && !dataSocket.destroyed, 'openPassiveDataSocket should return the active passive socket');
   assert.strictEqual(dataSocket.remoteAddress, '127.0.0.1');
 
-  const passiveQuitResp = await client.sendCommand('QUIT');
-  assert.match(passiveQuitResp, /^221/);
+  const passivePwdResp = await client.pwd();
+  assert.match(passivePwdResp, /^257/);
+  assert.deepStrictEqual(dataSocketInputs, [], 'control commands should not be sent on passive data socket');
+
   await client.exitPassiveMode();
 
   await client.quit();
+});
+
+test('custom FTPS client keeps using the control channel for commands in passive mode', async (t) => {
+  const commandsSeenOnControl = [];
+  let sawDataPayload = false;
+
+  const dataServer = net.createServer((socket) => {
+    socket.on('data', () => {
+      sawDataPayload = true;
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    dataServer.once('error', reject);
+    dataServer.listen(0, '127.0.0.1', resolve);
+  });
+  const dataAddress = dataServer.address();
+  if (!dataAddress || typeof dataAddress === 'string') {
+    throw new Error('Unable to determine passive data server address');
+  }
+
+  const p1 = Math.floor(dataAddress.port / 256);
+  const p2 = dataAddress.port % 256;
+
+  const controlServer = net.createServer((socket) => {
+    socket.write('220 FTP ready\r\n');
+    socket.on('data', (chunk) => {
+      const lines = chunk.toString('utf8').split(/\r?\n/).filter(Boolean);
+      for (const line of lines) {
+        commandsSeenOnControl.push(line);
+        if (line === 'PASV') {
+          socket.write(`227 Entering Passive Mode (127,0,0,1,${p1},${p2})\r\n`);
+          continue;
+        }
+        if (line === 'PWD') {
+          socket.write('257 "/" is current directory\r\n');
+          continue;
+        }
+        if (line === 'QUIT') {
+          socket.write('221 Goodbye\r\n');
+          socket.end();
+        }
+      }
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    controlServer.once('error', reject);
+    controlServer.listen(0, '127.0.0.1', resolve);
+  });
+  const controlAddress = controlServer.address();
+  if (!controlAddress || typeof controlAddress === 'string') {
+    throw new Error('Unable to determine FTP control server address');
+  }
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: controlAddress.port,
+    secure: false,
+  });
+
+  t.after(async () => {
+    await client.close();
+    await new Promise((resolve) => controlServer.close(resolve));
+    await new Promise((resolve) => dataServer.close(resolve));
+  });
+
+  await client.connect();
+  await client.enterPassiveMode();
+  const pwdResp = await client.pwd();
+  assert.match(pwdResp, /^257/);
+  await client.quit();
+
+  assert.deepStrictEqual(commandsSeenOnControl, ['PASV', 'PWD', 'QUIT']);
+  assert.strictEqual(sawDataPayload, false, 'no command bytes should be sent to the passive data socket');
+});
+
+test('custom FTPS client receives RETR payload on passive data socket and logs passive data', async (t) => {
+  const commandsSeenOnControl = [];
+  const passiveChunks = [];
+  const verboseLogs = [];
+  const filePayload = 'hello-from-passive-data-socket\nline-2\n';
+
+  const dataServer = net.createServer((socket) => {
+    socket.write(filePayload);
+    socket.end();
+  });
+
+  await new Promise((resolve, reject) => {
+    dataServer.once('error', reject);
+    dataServer.listen(0, '127.0.0.1', resolve);
+  });
+  const dataAddress = dataServer.address();
+  if (!dataAddress || typeof dataAddress === 'string') {
+    throw new Error('Unable to determine passive data server address');
+  }
+
+  const p1 = Math.floor(dataAddress.port / 256);
+  const p2 = dataAddress.port % 256;
+
+  const controlServer = net.createServer((socket) => {
+    socket.write('220 FTP ready\r\n');
+    socket.on('data', (chunk) => {
+      const lines = chunk.toString('utf8').split(/\r?\n/).filter(Boolean);
+      for (const line of lines) {
+        commandsSeenOnControl.push(line);
+        if (line === 'PASV') {
+          socket.write(`227 Entering Passive Mode (127,0,0,1,${p1},${p2})\r\n`);
+          continue;
+        }
+        if (line === 'RETR sample.txt') {
+          socket.write('150 Opening BINARY mode data connection\r\n');
+          continue;
+        }
+        if (line === 'QUIT') {
+          socket.write('221 Goodbye\r\n');
+          socket.end();
+        }
+      }
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    controlServer.once('error', reject);
+    controlServer.listen(0, '127.0.0.1', resolve);
+  });
+  const controlAddress = controlServer.address();
+  if (!controlAddress || typeof controlAddress === 'string') {
+    throw new Error('Unable to determine FTP control server address');
+  }
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: controlAddress.port,
+    secure: false,
+    verbose: true,
+    log: (line) => verboseLogs.push(line),
+  });
+
+  client.on('passive-data', (chunk) => passiveChunks.push(chunk));
+
+  t.after(async () => {
+    await client.close();
+    await new Promise((resolve) => controlServer.close(resolve));
+    await new Promise((resolve) => dataServer.close(resolve));
+  });
+
+  await client.connect();
+  await client.enterPassiveMode();
+
+  const passivePayloadPromise = withTimeout(new Promise((resolve, reject) => {
+    if (!client.passiveDataSocket) {
+      reject(new Error('Passive data socket missing after PASV'));
+      return;
+    }
+
+    client.passiveDataSocket.once('end', () => resolve(Buffer.concat(passiveChunks).toString('utf8')));
+    client.passiveDataSocket.once('error', reject);
+  }), 'passive data payload');
+
+  const retrResp = await client.sendCommand('RETR sample.txt');
+  assert.match(retrResp, /^150/);
+
+  const fullPayload = await passivePayloadPromise;
+
+  assert.strictEqual(fullPayload, filePayload);
+  assert.deepStrictEqual(commandsSeenOnControl, ['PASV', 'RETR sample.txt']);
+  assert.strictEqual(Buffer.concat(passiveChunks).toString('utf8'), filePayload);
+  assert.ok(
+    verboseLogs.some((line) => line.includes('received passive data:')),
+    'verbose logs should include received passive data',
+  );
 });
