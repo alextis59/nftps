@@ -15,6 +15,7 @@ class FtpsClient extends EventEmitter {
     verbose = false,
     log,
     secure = true,
+    ignorePasvAddress = false,
   } = {}) {
     super();
     this.host = host;
@@ -28,11 +29,36 @@ class FtpsClient extends EventEmitter {
     this.verbose = verbose;
     this.log = log;
     this.secure = secure;
+    this.ignorePasvAddress = ignorePasvAddress;
 
     this.socket = null;
     this.tlsClient = null;
     this.secureBuffer = Buffer.alloc(0);
     this.plainBuffer = Buffer.alloc(0);
+  }
+
+  async enterPassiveMode({ ignoreAddress = this.ignorePasvAddress } = {}) {
+    const resp = await this.sendCommand('PASV');
+    this.#assertCode(resp, 227, 'PASV response');
+
+    const endpoint = this.#parsePasvResponse(resp);
+    if (ignoreAddress) {
+      endpoint.host = this.host;
+    }
+
+    return endpoint;
+  }
+
+  async openPassiveDataSocket(options = {}) {
+    const { host, port } = await this.enterPassiveMode(options);
+    return await new Promise((resolve, reject) => {
+      const dataSocket = net.connect({ host, port });
+      dataSocket.once('error', reject);
+      dataSocket.once('connect', () => {
+        dataSocket.off('error', reject);
+        resolve(dataSocket);
+      });
+    });
   }
 
   async connect() {
@@ -206,6 +232,19 @@ class FtpsClient extends EventEmitter {
     if (!line || !line.startsWith(String(expected))) {
       throw new Error(`${context} failed: expected ${expected}, got "${line}"`);
     }
+  }
+
+  #parsePasvResponse(line) {
+    const match = line.match(/\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)/);
+    if (!match) {
+      throw new Error(`PASV response failed: unable to parse endpoint from "${line}"`);
+    }
+
+    const [, h1, h2, h3, h4, p1, p2] = match;
+    return {
+      host: `${h1}.${h2}.${h3}.${h4}`,
+      port: Number.parseInt(p1, 10) * 256 + Number.parseInt(p2, 10),
+    };
   }
 }
 

@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const tls = require('node:tls');
+const net = require('node:net');
 const { once } = require('node:events');
 const { FtpsClient } = require('../src/index.js');
 const {
@@ -414,4 +415,73 @@ test('custom FTPS client rejects server with untrusted CA', async (t) => {
     () => withTimeout(client.connect(), 'connect with wrong CA'),
     /trusted CA/i,
   );
+});
+
+test('custom FTPS client parses PASV and can ignore server-advertised address', async (t) => {
+  const dataServer = net.createServer();
+  await new Promise((resolve, reject) => {
+    dataServer.once('error', reject);
+    dataServer.listen(0, '127.0.0.1', resolve);
+  });
+  const dataAddress = dataServer.address();
+  if (!dataAddress || typeof dataAddress === 'string') {
+    throw new Error('Unable to determine passive data server address');
+  }
+
+  const p1 = Math.floor(dataAddress.port / 256);
+  const p2 = dataAddress.port % 256;
+
+  const controlServer = net.createServer((socket) => {
+    socket.write('220 FTP ready\r\n');
+    socket.on('data', (chunk) => {
+      const input = chunk.toString('utf8');
+      if (input.includes('PASV')) {
+        socket.write(`227 Entering Passive Mode (10,0,0,1,${p1},${p2})\r\n`);
+      }
+      if (input.includes('QUIT')) {
+        socket.write('221 Goodbye\r\n');
+        socket.end();
+      }
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    controlServer.once('error', reject);
+    controlServer.listen(0, '127.0.0.1', resolve);
+  });
+  const controlAddress = controlServer.address();
+  if (!controlAddress || typeof controlAddress === 'string') {
+    throw new Error('Unable to determine FTP control server address');
+  }
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: controlAddress.port,
+    secure: false,
+    ignorePasvAddress: true,
+  });
+
+  t.after(async () => {
+    await client.close();
+    await new Promise((resolve) => controlServer.close(resolve));
+    await new Promise((resolve) => dataServer.close(resolve));
+  });
+
+  await client.connect();
+
+  const endpointWithDefaultIgnore = await client.enterPassiveMode();
+  assert.deepStrictEqual(endpointWithDefaultIgnore, { host: '127.0.0.1', port: dataAddress.port });
+
+  const endpointWithoutIgnore = await client.enterPassiveMode({ ignoreAddress: false });
+  assert.deepStrictEqual(endpointWithoutIgnore, { host: '10.0.0.1', port: dataAddress.port });
+
+  const accepted = once(dataServer, 'connection');
+  const dataSocket = await client.openPassiveDataSocket();
+  const [acceptedSocket] = await accepted;
+
+  assert.strictEqual(dataSocket.remoteAddress, '127.0.0.1');
+  acceptedSocket.destroy();
+  dataSocket.destroy();
+
+  await client.quit();
 });

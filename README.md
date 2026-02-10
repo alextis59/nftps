@@ -24,6 +24,10 @@ npm test
 - Test coverage includes both:
   - implicit FTPS (`secure: true`) with `CCC` downgrade to cleartext
   - explicit FTPS (`secure: false` + `AUTH TLS`) with `CCC` downgrade to cleartext
+- Passive mode (`PASV`) support:
+  - `enterPassiveMode()` parses `227` responses and returns `{ host, port }`
+  - `openPassiveDataSocket()` connects to the announced passive data endpoint
+  - set `ignorePasvAddress: true` to use the control-channel host instead of the server-advertised PASV address (useful for NAT/broken servers)
 
 ## Certificate Support
 
