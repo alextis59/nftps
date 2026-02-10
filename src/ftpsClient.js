@@ -209,11 +209,7 @@ class FtpsClient extends EventEmitter {
   async sendCommand(command) {
     this.emit('command', command);
     this.#verboseLog(`sent control command: ${JSON.stringify(command)}`);
-    if (this.passiveDataSocket) {
-      await new Promise((resolve, reject) => {
-        this.passiveDataSocket.write(`${command}\r\n`, (err) => (err ? reject(err) : resolve()));
-      });
-    } else if (this.tlsClient) {
+    if (this.tlsClient) {
       await this.tlsClient.sendApplicationData(Buffer.from(`${command}\r\n`, 'utf8'));
     } else if (this.socket) {
       await new Promise((resolve, reject) => {
@@ -227,11 +223,6 @@ class FtpsClient extends EventEmitter {
   }
 
   async #readLine() {
-    if (this.passiveDataSocket) {
-      return this.#readLineFromSource('passiveBuffer', async () =>
-        new Promise((resolve) => this.passiveDataSocket.once('data', resolve)),
-      );
-    }
     if (this.tlsClient) {
       return this.#readLineFromSource('secureBuffer', async () => this.tlsClient.readApplicationData());
     }
@@ -298,9 +289,6 @@ class FtpsClient extends EventEmitter {
   }
 
   async #sendControlCommand(command) {
-    if (this.passiveDataSocket) {
-      return this.#runWithoutPassiveMode(() => this.sendCommand(command));
-    }
     return this.sendCommand(command);
   }
 
@@ -315,22 +303,14 @@ class FtpsClient extends EventEmitter {
         resolve(dataSocket);
       });
     });
+
+    this.passiveDataSocket.on('data', (chunk) => {
+      this.emit('passive-data', chunk);
+      this.#verboseLog(`received passive data: ${JSON.stringify(chunk.toString('utf8'))}`);
+    });
+
     this.passiveBuffer = Buffer.alloc(0);
     return this.passiveDataSocket;
-  }
-
-  async #runWithoutPassiveMode(callback) {
-    const socket = this.passiveDataSocket;
-    const buffer = this.passiveBuffer;
-    this.passiveDataSocket = null;
-    this.passiveBuffer = Buffer.alloc(0);
-
-    try {
-      return await callback();
-    } finally {
-      this.passiveDataSocket = socket;
-      this.passiveBuffer = buffer;
-    }
   }
 }
 
