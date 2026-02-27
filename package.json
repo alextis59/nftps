@@ -4,7 +4,7 @@
   "description": "Experimental FTPS/TLS testing playground",
   "main": "src/index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test test/ftps.test.js test/tlsClient/*.test.js"
   },
   "keywords": [
     "tls",
