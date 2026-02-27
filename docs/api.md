@@ -7,6 +7,13 @@ const {
   createTestTlsServer,
   TcpStream,
   TLS_VERSION_1_2,
+  TLS_RSA_WITH_AES_128_CBC_SHA,
+  TLS_RSA_WITH_AES_128_CBC_SHA256,
+  SUPPORTED_CIPHER_SUITES,
+  DEFAULT_COMPRESSION_METHODS,
+  DEFAULT_SIGNATURE_ALGORITHMS,
+  CIPHER_SUITE_TO_OPENSSL_NAME,
+  OPENSSL_CIPHER_NAME_TO_SUITE,
   TlsRecordLayer,
   TlsClient,
   makeCipherStateFromKeyBlock,
@@ -17,6 +24,16 @@ const {
 ## `TLS_VERSION_1_2`
 
 Numeric constant for TLS 1.2 (`0x0303`).
+
+## Cipher Suite Constants
+
+- `TLS_RSA_WITH_AES_128_CBC_SHA` (`0x002f`)
+- `TLS_RSA_WITH_AES_128_CBC_SHA256` (`0x003c`)
+- `SUPPORTED_CIPHER_SUITES` (default offer order used by `TlsClient`)
+- `DEFAULT_COMPRESSION_METHODS` (default ClientHello compression method list, currently `[0x00]`)
+- `DEFAULT_SIGNATURE_ALGORITHMS` (default `signature_algorithms` extension pairs)
+- `CIPHER_SUITE_TO_OPENSSL_NAME` (suite id -> OpenSSL cipher name)
+- `OPENSSL_CIPHER_NAME_TO_SUITE` (OpenSSL or IANA-style name -> suite id)
 
 ## `TcpStream`
 
@@ -78,6 +95,15 @@ Record framing and encryption/decryption for TLS records.
 - `ca` (PEM cert or array of PEM certs)
 - `rejectUnauthorized` (default `true`)
 - `checkServerIdentity` (optional function)
+- `cipherSuites` (optional array of TLS cipher suite numeric ids)
+- `ciphers` (optional OpenSSL-style cipher list string, e.g. `AES128-SHA256:AES128-SHA`)
+- `minVersion` (optional TLS version string; must include TLSv1.2 range support)
+- `maxVersion` (optional TLS version string; must include TLSv1.2 range support)
+- `compressionMethods` (optional array of ClientHello compression method ids)
+- `extensions` (optional ClientHello extension config object)
+- `extensions.serverName` (`boolean`, default `true`)
+- `extensions.signatureAlgorithms` (`true`/`false` or array of `{ hash, signature }`)
+- `extensions.extra` (array of raw extensions `{ type, data }`, where `data` is `Buffer`/`Uint8Array`)
 - `verbose` (default `false`)
 - `log` (optional logger function)
 
@@ -110,6 +136,12 @@ Record framing and encryption/decryption for TLS records.
 - `ca`
 - `rejectUnauthorized` (default `true`)
 - `checkServerIdentity`
+- `cipherSuites`
+- `ciphers`
+- `minVersion`
+- `maxVersion`
+- `compressionMethods`
+- `extensions`
 - `verbose` (default `false`)
 - `log`
 - `ignorePasvAddress` (default `false`)

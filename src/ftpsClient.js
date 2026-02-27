@@ -12,6 +12,12 @@ class FtpsClient extends EventEmitter {
     ca,
     rejectUnauthorized = true,
     checkServerIdentity,
+    cipherSuites,
+    ciphers,
+    minVersion,
+    maxVersion,
+    compressionMethods,
+    extensions,
     verbose = false,
     log,
     secure = true,
@@ -26,6 +32,12 @@ class FtpsClient extends EventEmitter {
     this.ca = ca;
     this.rejectUnauthorized = rejectUnauthorized;
     this.checkServerIdentity = checkServerIdentity;
+    this.cipherSuites = cipherSuites;
+    this.ciphers = ciphers;
+    this.minVersion = minVersion;
+    this.maxVersion = maxVersion;
+    this.compressionMethods = compressionMethods;
+    this.extensions = extensions;
     this.verbose = verbose;
     this.log = log;
     this.secure = secure;
@@ -98,6 +110,12 @@ class FtpsClient extends EventEmitter {
         ca: this.ca,
         rejectUnauthorized: this.rejectUnauthorized,
         checkServerIdentity: this.checkServerIdentity,
+        cipherSuites: this.cipherSuites,
+        ciphers: this.ciphers,
+        minVersion: this.minVersion,
+        maxVersion: this.maxVersion,
+        compressionMethods: this.compressionMethods,
+        extensions: this.extensions,
         verbose: this.verbose,
         log: this.log,
       });
@@ -140,6 +158,12 @@ class FtpsClient extends EventEmitter {
       ca: this.ca,
       rejectUnauthorized: this.rejectUnauthorized,
       checkServerIdentity: this.checkServerIdentity,
+      cipherSuites: this.cipherSuites,
+      ciphers: this.ciphers,
+      minVersion: this.minVersion,
+      maxVersion: this.maxVersion,
+      compressionMethods: this.compressionMethods,
+      extensions: this.extensions,
       verbose: this.verbose,
       log: this.log,
     });

@@ -15,7 +15,9 @@ This runs `node --test` and executes all tests under `test/`.
 - `test/tlsClient/certificateValidation.test.js`
 - `test/tlsClient/serverOptions.test.js`
 - `test/tlsClient/connectionValidation.test.js`
+- `test/tlsClient/options.test.js`
 - `test/tlsClient/cipherState.test.js`
+- `test/tlsClient/handshakeMessages.test.js`
 - `test/tlsClient/tcpStream.test.js`
 - `test/tlsClient/tlsRecordLayer.test.js`
 - `test/ftps.test.js`
@@ -25,6 +27,11 @@ This runs `node --test` and executes all tests under `test/`.
 - baseline Node TLS behavior against local TLS servers
 - custom `TlsClient` handshake + encrypted application data
 - cipher negotiation path for `AES128-SHA` and `AES128-SHA256`
+- `cipherSuites` option validation and single-suite offer coverage for each supported suite
+- `ciphers` option validation and single-suite offer coverage for each supported suite
+- `minVersion` / `maxVersion` validation and compatible-range handshake coverage
+- `compressionMethods` and `extensions` option validation and handshake coverage
+- direct option parser normalization/validation coverage for TLS client option helpers
 - certificate validation failures (wrong CA, hostname mismatch)
 - optional bypass path (`rejectUnauthorized: false`)
 - client-certificate authentication (mTLS)

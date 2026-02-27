@@ -3,7 +3,13 @@ const tls = require('node:tls');
 const { once } = require('node:events');
 
 const { TcpStream } = require('./tcpStream.js');
-const { CIPHER_SPECS, TLS_VERSION_1_2 } = require('./constants.js');
+const {
+  CIPHER_SPECS,
+  TLS_VERSION_1_2,
+  SUPPORTED_CIPHER_SUITES,
+  DEFAULT_COMPRESSION_METHODS,
+  DEFAULT_SIGNATURE_ALGORITHMS,
+} = require('./constants.js');
 const {
   computeFinishedVerifyData,
   deriveMasterSecret,
@@ -48,6 +54,13 @@ class TlsClient {
       caCertificates,
       rejectUnauthorized = true,
       checkServerIdentity = tls.checkServerIdentity,
+      cipherSuites,
+      compressionMethods,
+      extensions,
+      minVersion = 'TLSv1.2',
+      maxVersion = 'TLSv1.2',
+      minVersionCode = TLS_VERSION_1_2,
+      maxVersionCode = TLS_VERSION_1_2,
       verbose = false,
       log = defaultVerboseLogger,
     } = {},
@@ -59,6 +72,17 @@ class TlsClient {
     this.caCertificates = caCertificates;
     this.rejectUnauthorized = rejectUnauthorized;
     this.checkServerIdentity = checkServerIdentity;
+    this.cipherSuites = Array.isArray(cipherSuites) && cipherSuites.length > 0 ? [...cipherSuites] : [...SUPPORTED_CIPHER_SUITES];
+    this.compressionMethods = Array.isArray(compressionMethods) ? [...compressionMethods] : [...DEFAULT_COMPRESSION_METHODS];
+    this.extensions = extensions || {
+      serverName: true,
+      signatureAlgorithms: DEFAULT_SIGNATURE_ALGORITHMS.map(({ hash, signature }) => ({ hash, signature })),
+      extra: [],
+    };
+    this.minVersion = minVersion;
+    this.maxVersion = maxVersion;
+    this.minVersionCode = minVersionCode;
+    this.maxVersionCode = maxVersionCode;
     this.verbose = Boolean(verbose);
     this.log = typeof log === 'function' ? log : defaultVerboseLogger;
     this.authorized = false;
@@ -92,6 +116,12 @@ class TlsClient {
     ca,
     rejectUnauthorized = true,
     checkServerIdentity,
+    cipherSuites,
+    ciphers,
+    minVersion,
+    maxVersion,
+    compressionMethods,
+    extensions,
     verbose = false,
     log,
   }) {
@@ -105,6 +135,12 @@ class TlsClient {
       ca,
       rejectUnauthorized,
       checkServerIdentity,
+      cipherSuites,
+      ciphers,
+      minVersion,
+      maxVersion,
+      compressionMethods,
+      extensions,
     });
     ensureClientAuthMaterial(options.clientCertChain, options.clientPrivateKey);
 
@@ -133,6 +169,12 @@ class TlsClient {
       ca,
       rejectUnauthorized = true,
       checkServerIdentity,
+      cipherSuites,
+      ciphers,
+      minVersion,
+      maxVersion,
+      compressionMethods,
+      extensions,
       verbose = false,
       log,
     } = {},
@@ -147,6 +189,12 @@ class TlsClient {
       ca,
       rejectUnauthorized,
       checkServerIdentity,
+      cipherSuites,
+      ciphers,
+      minVersion,
+      maxVersion,
+      compressionMethods,
+      extensions,
     });
     ensureClientAuthMaterial(options.clientCertChain, options.clientPrivateKey);
 
@@ -166,7 +214,12 @@ class TlsClient {
 
   async doHandshake() {
     this.#verboseLog('starting TLS 1.2 handshake');
-    const { clientRandom, handshake: ch } = buildClientHello(this.hostname);
+    const { clientRandom, handshake: ch } = buildClientHello(
+      this.hostname,
+      this.cipherSuites,
+      this.compressionMethods,
+      this.extensions,
+    );
     this.clientRandom = clientRandom;
     this.handshakeTranscript.push(ch);
 
@@ -191,11 +244,19 @@ class TlsClient {
           `received ServerHello version=0x${serverHello.version.toString(16)} cipher=0x${serverHello.cipherSuite.toString(16)}`,
         );
 
+        if (serverHello.version < this.minVersionCode || serverHello.version > this.maxVersionCode) {
+          throw new Error(
+            `Server selected TLS version 0x${serverHello.version.toString(16)} outside configured range ${this.minVersion}-${this.maxVersion}`,
+          );
+        }
         if (serverHello.version !== TLS_VERSION_1_2) {
           throw new Error(`Unsupported TLS version 0x${serverHello.version.toString(16)}`);
         }
         if (!CIPHER_SPECS[serverHello.cipherSuite]) {
           throw new Error(`Server selected unsupported cipher suite 0x${serverHello.cipherSuite.toString(16)}`);
+        }
+        if (!this.cipherSuites.includes(serverHello.cipherSuite)) {
+          throw new Error(`Server selected a cipher suite not offered by client: 0x${serverHello.cipherSuite.toString(16)}`);
         }
         if (serverHello.compression !== 0x00) {
           throw new Error('Server selected non-null compression');

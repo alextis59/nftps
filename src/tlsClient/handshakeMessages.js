@@ -1,5 +1,9 @@
 const crypto = require('node:crypto');
-const { TLS_RSA_WITH_AES_128_CBC_SHA, TLS_RSA_WITH_AES_128_CBC_SHA256 } = require('./constants.js');
+const {
+  SUPPORTED_CIPHER_SUITES,
+  DEFAULT_COMPRESSION_METHODS,
+  DEFAULT_SIGNATURE_ALGORITHMS,
+} = require('./constants.js');
 const { computeFinishedVerifyData } = require('./cryptoPrimitives.js');
 
 function buildExtension(type, data) {
@@ -10,22 +14,7 @@ function buildExtension(type, data) {
   return ext;
 }
 
-function buildClientHello(hostname) {
-  const clientRandom = Buffer.alloc(32);
-  clientRandom.writeUInt32BE(Math.floor(Date.now() / 1000), 0);
-  crypto.randomBytes(28).copy(clientRandom, 4);
-
-  const sessionId = Buffer.from([0x00]);
-
-  const offeredCipherSuites = [TLS_RSA_WITH_AES_128_CBC_SHA256, TLS_RSA_WITH_AES_128_CBC_SHA];
-  const cipherSuites = Buffer.alloc(2 + offeredCipherSuites.length * 2);
-  cipherSuites.writeUInt16BE(offeredCipherSuites.length * 2, 0);
-  for (let i = 0; i < offeredCipherSuites.length; i += 1) {
-    cipherSuites.writeUInt16BE(offeredCipherSuites[i], 2 + i * 2);
-  }
-
-  const compressionMethods = Buffer.from([0x01, 0x00]);
-
+function buildServerNameExtension(hostname) {
   const hostBuf = Buffer.from(hostname, 'ascii');
   const serverNameListLen = 1 + 2 + hostBuf.length;
   const sniData = Buffer.alloc(2 + serverNameListLen);
@@ -33,17 +22,70 @@ function buildClientHello(hostname) {
   sniData.writeUInt8(0x00, 2);
   sniData.writeUInt16BE(hostBuf.length, 3);
   hostBuf.copy(sniData, 5);
+  return sniData;
+}
 
-  // signature_algorithms (TLS 1.2)
-  // Keep the list short: rsa_pkcs1_sha256 and rsa_pkcs1_sha1.
-  const sigAlgsData = Buffer.alloc(2 + 4);
-  sigAlgsData.writeUInt16BE(4, 0);
-  sigAlgsData.writeUInt8(0x04, 2);
-  sigAlgsData.writeUInt8(0x01, 3);
-  sigAlgsData.writeUInt8(0x02, 4);
-  sigAlgsData.writeUInt8(0x01, 5);
+function buildSignatureAlgorithmsExtension(signatureAlgorithms) {
+  const body = Buffer.alloc(2 + signatureAlgorithms.length * 2);
+  body.writeUInt16BE(signatureAlgorithms.length * 2, 0);
+  for (let i = 0; i < signatureAlgorithms.length; i += 1) {
+    const { hash, signature } = signatureAlgorithms[i];
+    body.writeUInt8(hash, 2 + i * 2);
+    body.writeUInt8(signature, 3 + i * 2);
+  }
+  return body;
+}
 
-  const extBlocks = [buildExtension(0x0000, sniData), buildExtension(0x000d, sigAlgsData)];
+function buildClientHello(
+  hostname,
+  offeredCipherSuites = SUPPORTED_CIPHER_SUITES,
+  compressionMethodsInput = DEFAULT_COMPRESSION_METHODS,
+  extensionsConfig = {
+    serverName: true,
+    signatureAlgorithms: DEFAULT_SIGNATURE_ALGORITHMS,
+    extra: [],
+  },
+) {
+  if (!Array.isArray(offeredCipherSuites) || offeredCipherSuites.length === 0) {
+    throw new TypeError('offeredCipherSuites must be a non-empty array');
+  }
+  if (!Array.isArray(compressionMethodsInput) || compressionMethodsInput.length === 0) {
+    throw new TypeError('compressionMethods must be a non-empty array');
+  }
+  if (!extensionsConfig || typeof extensionsConfig !== 'object') {
+    throw new TypeError('extensionsConfig must be an object');
+  }
+
+  const clientRandom = Buffer.alloc(32);
+  clientRandom.writeUInt32BE(Math.floor(Date.now() / 1000), 0);
+  crypto.randomBytes(28).copy(clientRandom, 4);
+
+  const sessionId = Buffer.from([0x00]);
+
+  const cipherSuites = Buffer.alloc(2 + offeredCipherSuites.length * 2);
+  cipherSuites.writeUInt16BE(offeredCipherSuites.length * 2, 0);
+  for (let i = 0; i < offeredCipherSuites.length; i += 1) {
+    cipherSuites.writeUInt16BE(offeredCipherSuites[i], 2 + i * 2);
+  }
+
+  const compressionMethods = Buffer.alloc(1 + compressionMethodsInput.length);
+  compressionMethods.writeUInt8(compressionMethodsInput.length, 0);
+  for (let i = 0; i < compressionMethodsInput.length; i += 1) {
+    compressionMethods.writeUInt8(compressionMethodsInput[i], 1 + i);
+  }
+
+  const extBlocks = [];
+  if (extensionsConfig.serverName) {
+    extBlocks.push(buildExtension(0x0000, buildServerNameExtension(hostname)));
+  }
+  if (Array.isArray(extensionsConfig.signatureAlgorithms) && extensionsConfig.signatureAlgorithms.length > 0) {
+    extBlocks.push(buildExtension(0x000d, buildSignatureAlgorithmsExtension(extensionsConfig.signatureAlgorithms)));
+  }
+  if (Array.isArray(extensionsConfig.extra)) {
+    for (const ext of extensionsConfig.extra) {
+      extBlocks.push(buildExtension(ext.type, ext.data));
+    }
+  }
   const extPayload = Buffer.concat(extBlocks);
   const extensions = Buffer.alloc(2 + extPayload.length);
   extensions.writeUInt16BE(extPayload.length, 0);
