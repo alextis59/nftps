@@ -345,11 +345,15 @@ class TlsClient {
 
     this.masterSecret = deriveMasterSecret(this.preMasterSecret, this.clientRandom, this.serverRandom);
     this.cipherSpec = CIPHER_SPECS[this.selectedCipherSuite];
-    const keyBlockLength = this.cipherSpec.macKeyLength * 2 + 16 + 16 + 16 + 16;
+    const keyLength = Number.isInteger(this.cipherSpec.keyLength) ? this.cipherSpec.keyLength : 16;
+    const ivLength = Number.isInteger(this.cipherSpec.ivLength) ? this.cipherSpec.ivLength : 16;
+    const keyBlockLength = this.cipherSpec.macKeyLength * 2 + keyLength * 2 + ivLength * 2;
     const keyBlock = deriveKeyBlock(this.masterSecret, this.serverRandom, this.clientRandom, keyBlockLength);
     const cipherState = makeCipherStateFromKeyBlock(keyBlock, this.cipherSpec);
     this.recordLayer.installCipher(cipherState);
-    this.#verboseLog(`installed cipher suite=0x${this.selectedCipherSuite.toString(16)} mac=${this.cipherSpec.macAlgorithm}`);
+    this.#verboseLog(
+      `installed cipher suite=0x${this.selectedCipherSuite.toString(16)} cipher=${cipherState.cipherAlgorithm} mac=${this.cipherSpec.macAlgorithm}`,
+    );
 
     if (sentClientCert) {
       const certVerify = buildCertificateVerify(this.clientPrivateKey, this.handshakeTranscript);

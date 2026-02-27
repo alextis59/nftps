@@ -11,7 +11,15 @@ function makeCipherStateFromKeyBlock(keyBlock, cipherSpec = CIPHER_SPECS[TLS_RSA
     throw new TypeError('cipherSpec must be an object');
   }
 
-  const { macKeyLength, macAlgorithm, macLength } = cipherSpec;
+  const {
+    macKeyLength,
+    macAlgorithm,
+    macLength,
+    keyLength = 16,
+    ivLength = 16,
+    blockSize = 16,
+    cipherAlgorithm = 'aes-128-cbc',
+  } = cipherSpec;
   if (!Number.isInteger(macKeyLength) || macKeyLength <= 0) {
     throw new TypeError('cipherSpec.macKeyLength must be a positive integer');
   }
@@ -21,8 +29,20 @@ function makeCipherStateFromKeyBlock(keyBlock, cipherSpec = CIPHER_SPECS[TLS_RSA
   if (!Number.isInteger(macLength) || macLength <= 0) {
     throw new TypeError('cipherSpec.macLength must be a positive integer');
   }
+  if (!Number.isInteger(keyLength) || keyLength <= 0) {
+    throw new TypeError('cipherSpec.keyLength must be a positive integer');
+  }
+  if (!Number.isInteger(ivLength) || ivLength <= 0) {
+    throw new TypeError('cipherSpec.ivLength must be a positive integer');
+  }
+  if (!Number.isInteger(blockSize) || blockSize <= 0) {
+    throw new TypeError('cipherSpec.blockSize must be a positive integer');
+  }
+  if (typeof cipherAlgorithm !== 'string' || cipherAlgorithm.length === 0) {
+    throw new TypeError('cipherSpec.cipherAlgorithm must be a non-empty string');
+  }
 
-  const REQUIRED = macKeyLength * 2 + 16 + 16 + 16 + 16;
+  const REQUIRED = macKeyLength * 2 + keyLength * 2 + ivLength * 2;
   if (keyBlock.length < REQUIRED) {
     throw new Error(`keyBlock must be at least ${REQUIRED} bytes`);
   }
@@ -30,10 +50,10 @@ function makeCipherStateFromKeyBlock(keyBlock, cipherSpec = CIPHER_SPECS[TLS_RSA
   let offset = 0;
   const clientWriteMacKey = keyBlock.subarray(offset, (offset += macKeyLength));
   const serverWriteMacKey = keyBlock.subarray(offset, (offset += macKeyLength));
-  const clientWriteKey = keyBlock.subarray(offset, (offset += 16));
-  const serverWriteKey = keyBlock.subarray(offset, (offset += 16));
-  const clientWriteIV = keyBlock.subarray(offset, (offset += 16));
-  const serverWriteIV = keyBlock.subarray(offset, (offset += 16));
+  const clientWriteKey = keyBlock.subarray(offset, (offset += keyLength));
+  const serverWriteKey = keyBlock.subarray(offset, (offset += keyLength));
+  const clientWriteIV = keyBlock.subarray(offset, (offset += ivLength));
+  const serverWriteIV = keyBlock.subarray(offset, (offset += ivLength));
 
   return {
     clientWriteMacKey,
@@ -42,6 +62,9 @@ function makeCipherStateFromKeyBlock(keyBlock, cipherSpec = CIPHER_SPECS[TLS_RSA
     serverWriteKey,
     clientWriteIV,
     serverWriteIV,
+    cipherAlgorithm,
+    blockSize,
+    ivLength,
     macAlgorithm,
     macLength,
     clientSeqNum: 0n,

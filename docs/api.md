@@ -8,7 +8,9 @@ const {
   TcpStream,
   TLS_VERSION_1_2,
   TLS_RSA_WITH_AES_128_CBC_SHA,
+  TLS_RSA_WITH_AES_256_CBC_SHA,
   TLS_RSA_WITH_AES_128_CBC_SHA256,
+  TLS_RSA_WITH_AES_256_CBC_SHA256,
   SUPPORTED_CIPHER_SUITES,
   DEFAULT_COMPRESSION_METHODS,
   DEFAULT_SIGNATURE_ALGORITHMS,
@@ -28,7 +30,9 @@ Numeric constant for TLS 1.2 (`0x0303`).
 ## Cipher Suite Constants
 
 - `TLS_RSA_WITH_AES_128_CBC_SHA` (`0x002f`)
+- `TLS_RSA_WITH_AES_256_CBC_SHA` (`0x0035`)
 - `TLS_RSA_WITH_AES_128_CBC_SHA256` (`0x003c`)
+- `TLS_RSA_WITH_AES_256_CBC_SHA256` (`0x003d`)
 - `SUPPORTED_CIPHER_SUITES` (default offer order used by `TlsClient`)
 - `DEFAULT_COMPRESSION_METHODS` (default ClientHello compression method list, currently `[0x00]`)
 - `DEFAULT_SIGNATURE_ALGORITHMS` (default `signature_algorithms` extension pairs)

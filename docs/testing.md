@@ -26,7 +26,7 @@ This runs `node --test` and executes all tests under `test/`.
 
 - baseline Node TLS behavior against local TLS servers
 - custom `TlsClient` handshake + encrypted application data
-- cipher negotiation path for `AES128-SHA` and `AES128-SHA256`
+- cipher negotiation path for all supported RSA AES-CBC suites (`AES128-SHA`, `AES256-SHA`, `AES128-SHA256`, `AES256-SHA256`)
 - `cipherSuites` option validation and single-suite offer coverage for each supported suite
 - `ciphers` option validation and single-suite offer coverage for each supported suite
 - `minVersion` / `maxVersion` validation and compatible-range handshake coverage

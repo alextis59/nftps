@@ -1,7 +1,14 @@
 const TLS_VERSION_1_2 = 0x0303;
 const TLS_RSA_WITH_AES_128_CBC_SHA = 0x002f;
+const TLS_RSA_WITH_AES_256_CBC_SHA = 0x0035;
 const TLS_RSA_WITH_AES_128_CBC_SHA256 = 0x003c;
-const SUPPORTED_CIPHER_SUITES = [TLS_RSA_WITH_AES_128_CBC_SHA256, TLS_RSA_WITH_AES_128_CBC_SHA];
+const TLS_RSA_WITH_AES_256_CBC_SHA256 = 0x003d;
+const SUPPORTED_CIPHER_SUITES = [
+  TLS_RSA_WITH_AES_128_CBC_SHA256,
+  TLS_RSA_WITH_AES_256_CBC_SHA256,
+  TLS_RSA_WITH_AES_128_CBC_SHA,
+  TLS_RSA_WITH_AES_256_CBC_SHA,
+];
 const DEFAULT_COMPRESSION_METHODS = [0x00];
 const DEFAULT_SIGNATURE_ALGORITHMS = [
   { hash: 0x04, signature: 0x01 },
@@ -9,22 +16,54 @@ const DEFAULT_SIGNATURE_ALGORITHMS = [
 ];
 const CIPHER_SUITE_TO_OPENSSL_NAME = {
   [TLS_RSA_WITH_AES_128_CBC_SHA]: 'AES128-SHA',
+  [TLS_RSA_WITH_AES_256_CBC_SHA]: 'AES256-SHA',
   [TLS_RSA_WITH_AES_128_CBC_SHA256]: 'AES128-SHA256',
+  [TLS_RSA_WITH_AES_256_CBC_SHA256]: 'AES256-SHA256',
 };
 const OPENSSL_CIPHER_NAME_TO_SUITE = {
   'AES128-SHA': TLS_RSA_WITH_AES_128_CBC_SHA,
+  'AES256-SHA': TLS_RSA_WITH_AES_256_CBC_SHA,
   'AES128-SHA256': TLS_RSA_WITH_AES_128_CBC_SHA256,
-  TLS_RSA_WITH_AES_128_CBC_SHA,
-  TLS_RSA_WITH_AES_128_CBC_SHA256,
+  'AES256-SHA256': TLS_RSA_WITH_AES_256_CBC_SHA256,
+  'TLS_RSA_WITH_AES_128_CBC_SHA': TLS_RSA_WITH_AES_128_CBC_SHA,
+  'TLS_RSA_WITH_AES_256_CBC_SHA': TLS_RSA_WITH_AES_256_CBC_SHA,
+  'TLS_RSA_WITH_AES_128_CBC_SHA256': TLS_RSA_WITH_AES_128_CBC_SHA256,
+  'TLS_RSA_WITH_AES_256_CBC_SHA256': TLS_RSA_WITH_AES_256_CBC_SHA256,
 };
 
 const CIPHER_SPECS = {
   [TLS_RSA_WITH_AES_128_CBC_SHA]: {
+    cipherAlgorithm: 'aes-128-cbc',
+    keyLength: 16,
+    ivLength: 16,
+    blockSize: 16,
+    macAlgorithm: 'sha1',
+    macKeyLength: 20,
+    macLength: 20,
+  },
+  [TLS_RSA_WITH_AES_256_CBC_SHA]: {
+    cipherAlgorithm: 'aes-256-cbc',
+    keyLength: 32,
+    ivLength: 16,
+    blockSize: 16,
     macAlgorithm: 'sha1',
     macKeyLength: 20,
     macLength: 20,
   },
   [TLS_RSA_WITH_AES_128_CBC_SHA256]: {
+    cipherAlgorithm: 'aes-128-cbc',
+    keyLength: 16,
+    ivLength: 16,
+    blockSize: 16,
+    macAlgorithm: 'sha256',
+    macKeyLength: 32,
+    macLength: 32,
+  },
+  [TLS_RSA_WITH_AES_256_CBC_SHA256]: {
+    cipherAlgorithm: 'aes-256-cbc',
+    keyLength: 32,
+    ivLength: 16,
+    blockSize: 16,
     macAlgorithm: 'sha256',
     macKeyLength: 32,
     macLength: 32,
@@ -34,7 +73,9 @@ const CIPHER_SPECS = {
 module.exports = {
   TLS_VERSION_1_2,
   TLS_RSA_WITH_AES_128_CBC_SHA,
+  TLS_RSA_WITH_AES_256_CBC_SHA,
   TLS_RSA_WITH_AES_128_CBC_SHA256,
+  TLS_RSA_WITH_AES_256_CBC_SHA256,
   SUPPORTED_CIPHER_SUITES,
   DEFAULT_COMPRESSION_METHODS,
   DEFAULT_SIGNATURE_ALGORITHMS,

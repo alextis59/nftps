@@ -86,6 +86,11 @@ class TlsRecordLayer {
 
     const c = this.cipher;
     const seqNum = c.clientSeqNum;
+    const blockSize = Number.isInteger(c.blockSize) && c.blockSize > 0 ? c.blockSize : 16;
+    const ivLength = Number.isInteger(c.ivLength) && c.ivLength > 0 ? c.ivLength : 16;
+    const cipherAlgorithm = typeof c.cipherAlgorithm === 'string' && c.cipherAlgorithm.length > 0
+      ? c.cipherAlgorithm
+      : 'aes-128-cbc';
 
     const seqBuf = Buffer.alloc(8);
     seqBuf.writeBigUInt64BE(seqNum);
@@ -98,13 +103,12 @@ class TlsRecordLayer {
     const mac = crypto.createHmac(c.macAlgorithm, c.clientWriteMacKey).update(macInput).digest();
 
     let plain = Buffer.concat([plaintext, mac]);
-    const blockSize = 16;
     const padLen = blockSize - ((plain.length + 1) % blockSize);
     const pad = Buffer.alloc(padLen + 1, padLen);
     plain = Buffer.concat([plain, pad]);
 
-    const iv = crypto.randomBytes(16);
-    const cipher = crypto.createCipheriv('aes-128-cbc', c.clientWriteKey, iv);
+    const iv = crypto.randomBytes(ivLength);
+    const cipher = crypto.createCipheriv(cipherAlgorithm, c.clientWriteKey, iv);
     cipher.setAutoPadding(false);
     const encrypted = Buffer.concat([cipher.update(plain), cipher.final()]);
 
@@ -137,15 +141,19 @@ class TlsRecordLayer {
     const fragment = await this.tcp.readExactly(length);
     const c = this.cipher;
     const seqNum = c.serverSeqNum;
+    const ivLength = Number.isInteger(c.ivLength) && c.ivLength > 0 ? c.ivLength : 16;
+    const cipherAlgorithm = typeof c.cipherAlgorithm === 'string' && c.cipherAlgorithm.length > 0
+      ? c.cipherAlgorithm
+      : 'aes-128-cbc';
 
-    if (fragment.length < 16) {
+    if (fragment.length < ivLength) {
       throw new Error('Encrypted fragment too short (no IV)');
     }
 
-    const iv = fragment.subarray(0, 16);
-    const ciphertext = fragment.subarray(16);
+    const iv = fragment.subarray(0, ivLength);
+    const ciphertext = fragment.subarray(ivLength);
 
-    const decipher = crypto.createDecipheriv('aes-128-cbc', c.serverWriteKey, iv);
+    const decipher = crypto.createDecipheriv(cipherAlgorithm, c.serverWriteKey, iv);
     decipher.setAutoPadding(false);
     let plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 

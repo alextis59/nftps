@@ -3,6 +3,7 @@ const assert = require('node:assert');
 const { buildClientHello } = require('../../src/tlsClient/handshakeMessages.js');
 const {
   TLS_VERSION_1_2,
+  SUPPORTED_CIPHER_SUITES,
   TLS_RSA_WITH_AES_128_CBC_SHA,
   TLS_RSA_WITH_AES_128_CBC_SHA256,
 } = require('../../src/index.js');
@@ -70,8 +71,7 @@ test('buildClientHello emits TLS 1.2 defaults including null compression and sta
 
   assert.strictEqual(parsed.version, TLS_VERSION_1_2);
   assert.deepStrictEqual(parsed.compressionMethods, [0x00]);
-  assert.ok(parsed.cipherSuites.includes(TLS_RSA_WITH_AES_128_CBC_SHA));
-  assert.ok(parsed.cipherSuites.includes(TLS_RSA_WITH_AES_128_CBC_SHA256));
+  assert.deepStrictEqual(parsed.cipherSuites, SUPPORTED_CIPHER_SUITES);
   assert.ok(parsed.extensions.has(0x0000), 'expected server_name extension');
   assert.ok(parsed.extensions.has(0x000d), 'expected signature_algorithms extension');
   assert.deepStrictEqual(parseSignatureAlgorithmsExtension(parsed.extensions.get(0x000d)), [

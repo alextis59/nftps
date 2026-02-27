@@ -9,7 +9,9 @@ const {
 const {
   SUPPORTED_CIPHER_SUITES,
   TLS_RSA_WITH_AES_128_CBC_SHA,
+  TLS_RSA_WITH_AES_256_CBC_SHA,
   TLS_RSA_WITH_AES_128_CBC_SHA256,
+  TLS_RSA_WITH_AES_256_CBC_SHA256,
 } = require('../../src/index.js');
 
 test('parseCompressionMethods returns defaults and deduplicates configured methods', () => {
@@ -18,11 +20,20 @@ test('parseCompressionMethods returns defaults and deduplicates configured metho
 });
 
 test('parseCiphers handles whitespace list and rejects empty effective cipher list', () => {
-  assert.deepStrictEqual(parseCiphers(' AES128-SHA256 : AES128-SHA256 : AES128-SHA '), [
+  assert.deepStrictEqual(parseCiphers(' AES128-SHA256 : AES256-SHA256 : AES256-SHA : AES128-SHA256 : AES128-SHA '), [
     TLS_RSA_WITH_AES_128_CBC_SHA256,
+    TLS_RSA_WITH_AES_256_CBC_SHA256,
+    TLS_RSA_WITH_AES_256_CBC_SHA,
     TLS_RSA_WITH_AES_128_CBC_SHA,
   ]);
   assert.throws(() => parseCiphers(' : '), /ciphers must include at least one cipher name/);
+});
+
+test('parseCiphers supports IANA-style cipher names', () => {
+  assert.deepStrictEqual(
+    parseCiphers('TLS_RSA_WITH_AES_256_CBC_SHA256:TLS_RSA_WITH_AES_128_CBC_SHA'),
+    [TLS_RSA_WITH_AES_256_CBC_SHA256, TLS_RSA_WITH_AES_128_CBC_SHA],
+  );
 });
 
 test('parseClientHelloExtensions supports disabling defaults and accepts Uint8Array extra data', () => {

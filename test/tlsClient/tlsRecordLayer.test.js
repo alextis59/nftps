@@ -22,6 +22,9 @@ class FakeTcp {
 
 function makeCipher() {
   return {
+    cipherAlgorithm: 'aes-128-cbc',
+    blockSize: 16,
+    ivLength: 16,
     clientWriteMacKey: Buffer.alloc(20, 0x01),
     serverWriteMacKey: Buffer.alloc(20, 0x02),
     clientWriteKey: Buffer.alloc(16, 0x03),
@@ -30,6 +33,22 @@ function makeCipher() {
     serverSeqNum: 0n,
     macAlgorithm: 'sha1',
     macLength: 20,
+  };
+}
+
+function makeCipher256() {
+  return {
+    cipherAlgorithm: 'aes-256-cbc',
+    blockSize: 16,
+    ivLength: 16,
+    clientWriteMacKey: Buffer.alloc(32, 0x01),
+    serverWriteMacKey: Buffer.alloc(32, 0x02),
+    clientWriteKey: Buffer.alloc(32, 0x03),
+    serverWriteKey: Buffer.alloc(32, 0x04),
+    clientSeqNum: 0n,
+    serverSeqNum: 0n,
+    macAlgorithm: 'sha256',
+    macLength: 32,
   };
 }
 
@@ -105,6 +124,21 @@ test('sendAlertCloseNotify uses plaintext and encrypted paths', async () => {
   await layer.sendAlertCloseNotify();
   assert.strictEqual(tcp.writes.length, 2);
   assert.strictEqual(layer.state, 'ENCRYPTED');
+});
+
+test('writeEncryptedRecord supports configured AES-256 cipher state', async () => {
+  const tcp = new FakeTcp();
+  const layer = new TlsRecordLayer(tcp);
+  layer.installCipher(makeCipher256());
+  layer.state = 'ENCRYPTING';
+
+  await layer.writeEncryptedRecord(0x17, Buffer.from('ping'));
+
+  assert.strictEqual(tcp.writes.length, 1);
+  const wire = tcp.writes[0];
+  assert.strictEqual(wire.readUInt8(0), 0x17);
+  assert.strictEqual(wire.readUInt16BE(1), layer.version);
+  assert.ok(wire.readUInt16BE(3) > 16);
 });
 
 test('readEncryptedRecord validates version and fragment size', async () => {
