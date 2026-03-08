@@ -2,9 +2,13 @@ const test = require('node:test');
 const assert = require('node:assert');
 const {
   parseConnectionOptions,
+  parseCipherSuites,
   parseCompressionMethods,
   parseCiphers,
   parseClientHelloExtensions,
+  parseTlsVersionRange,
+  defaultVerboseLogger,
+  formatVerboseBuffer,
 } = require('../../src/tlsClient/options.js');
 const {
   SUPPORTED_CIPHER_SUITES,
@@ -17,6 +21,14 @@ const {
 test('parseCompressionMethods returns defaults and deduplicates configured methods', () => {
   assert.deepStrictEqual(parseCompressionMethods(undefined), [0x00]);
   assert.deepStrictEqual(parseCompressionMethods([0x00, 0x00, 0x01]), [0x00, 0x01]);
+});
+
+test('parseCipherSuites returns defaults and deduplicates configured suites', () => {
+  assert.deepStrictEqual(parseCipherSuites(undefined), SUPPORTED_CIPHER_SUITES);
+  assert.deepStrictEqual(
+    parseCipherSuites([TLS_RSA_WITH_AES_128_CBC_SHA, TLS_RSA_WITH_AES_128_CBC_SHA, TLS_RSA_WITH_AES_256_CBC_SHA]),
+    [TLS_RSA_WITH_AES_128_CBC_SHA, TLS_RSA_WITH_AES_256_CBC_SHA],
+  );
 });
 
 test('parseCiphers handles whitespace list and rejects empty effective cipher list', () => {
@@ -53,6 +65,17 @@ test('parseClientHelloExtensions supports disabling defaults and accepts Uint8Ar
   assert.ok(Buffer.isBuffer(parsed.extra[0].data));
 });
 
+test('parseClientHelloExtensions defaults extra extensions to an empty list', () => {
+  const parsed = parseClientHelloExtensions({
+    serverName: false,
+    signatureAlgorithms: false,
+  });
+
+  assert.strictEqual(parsed.serverName, false);
+  assert.strictEqual(parsed.signatureAlgorithms, null);
+  assert.deepStrictEqual(parsed.extra, []);
+});
+
 test('parseClientHelloExtensions validates malformed signature and extra extension entries', () => {
   assert.throws(
     () => parseClientHelloExtensions({ signatureAlgorithms: [null] }),
@@ -82,6 +105,21 @@ test('parseClientHelloExtensions validates malformed signature and extra extensi
   );
 });
 
+test('parseTlsVersionRange returns defaults when omitted and accepts ranges including TLSv1.2', () => {
+  assert.deepStrictEqual(parseTlsVersionRange(undefined, undefined), {
+    minVersion: 'TLSv1.2',
+    maxVersion: 'TLSv1.2',
+    minVersionCode: 0x0303,
+    maxVersionCode: 0x0303,
+  });
+  assert.deepStrictEqual(parseTlsVersionRange('TLSv1.2', 'TLSv1.3'), {
+    minVersion: 'TLSv1.2',
+    maxVersion: 'TLSv1.3',
+    minVersionCode: 0x0303,
+    maxVersionCode: 0x0304,
+  });
+});
+
 test('parseConnectionOptions includes defaults and normalized extension fields', () => {
   const options = parseConnectionOptions({
     servername: 'localhost',
@@ -99,4 +137,22 @@ test('parseConnectionOptions includes defaults and normalized extension fields',
   assert.ok(Array.isArray(options.extensions.signatureAlgorithms));
   assert.ok(options.extensions.signatureAlgorithms.length > 0);
   assert.ok(Buffer.isBuffer(options.extensions.extra[0].data));
+});
+
+test('defaultVerboseLogger delegates to console.log and formatVerboseBuffer escapes newlines', () => {
+  const originalLog = console.log;
+  const messages = [];
+  console.log = (message) => {
+    messages.push(message);
+  };
+
+  try {
+    defaultVerboseLogger('hello');
+  } finally {
+    console.log = originalLog;
+  }
+
+  assert.deepStrictEqual(messages, ['hello']);
+  assert.strictEqual(formatVerboseBuffer(Buffer.from('line1\nline2')), '"line1\\\\nline2"');
+  assert.match(formatVerboseBuffer(Buffer.alloc(100, 0x61)), /…/);
 });

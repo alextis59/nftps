@@ -133,10 +133,14 @@ function parseServerHello(body) {
 
   const extensions = new Map();
   if (offset < body.length) {
+    if (offset + 2 > body.length) {
+      throw new Error('Invalid ServerHello.extensions length');
+    }
+
     const extensionsLen = body.readUInt16BE(offset);
     offset += 2;
     const end = offset + extensionsLen;
-    if (end > body.length) {
+    if (end !== body.length) {
       throw new Error('Invalid ServerHello.extensions length');
     }
 
@@ -145,9 +149,16 @@ function parseServerHello(body) {
       offset += 2;
       const extLen = body.readUInt16BE(offset);
       offset += 2;
+      if (offset + extLen > end) {
+        throw new Error('Invalid ServerHello extension length');
+      }
       const extData = body.subarray(offset, offset + extLen);
       offset += extLen;
       extensions.set(extType, extData);
+    }
+
+    if (offset !== end) {
+      throw new Error('Trailing bytes in ServerHello extensions');
     }
   }
 
@@ -163,7 +174,7 @@ function parseCertificate(body) {
   const totalLen = body.readUIntBE(offset, 3);
   offset += 3;
   const end = offset + totalLen;
-  if (end > body.length) {
+  if (end !== body.length) {
     throw new Error('Invalid total certificate length');
   }
 
@@ -171,9 +182,16 @@ function parseCertificate(body) {
   while (offset + 3 <= end) {
     const certLen = body.readUIntBE(offset, 3);
     offset += 3;
+    if (offset + certLen > end) {
+      throw new Error('Invalid certificate entry length');
+    }
     const cert = body.subarray(offset, offset + certLen);
     offset += certLen;
     certs.push(cert);
+  }
+
+  if (offset !== end) {
+    throw new Error('Trailing bytes in Certificate message');
   }
 
   if (certs.length === 0) {
@@ -282,6 +300,9 @@ function parseCertificateRequest(body) {
 
   const certTypesLen = body.readUInt8(offset);
   offset += 1;
+  if (offset + certTypesLen > body.length) {
+    throw new Error('Invalid certificate_types length in CertificateRequest');
+  }
   const certTypes = [...body.subarray(offset, offset + certTypesLen)];
   offset += certTypesLen;
 
@@ -321,6 +342,10 @@ function parseCertificateRequest(body) {
 
   // Skip distinguished names; we don't need them for the test scenarios
   offset = namesEnd;
+
+  if (offset !== body.length) {
+    throw new Error('Trailing bytes in CertificateRequest');
+  }
 
   return { certTypes, signatureAlgorithms };
 }

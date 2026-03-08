@@ -230,16 +230,22 @@ class TlsClient {
     let sawServerHello = false;
     let sawServerCert = false;
     let certRequest = null;
+    let expectedServerHandshake = 'server_hello';
 
     while (true) {
       const msg = await this.readHandshakeMessage(false);
 
       if (msg.type === 0x02) {
+        if (expectedServerHandshake !== 'server_hello') {
+          throw new Error('Unexpected ServerHello ordering in handshake');
+        }
+
         this.handshakeTranscript.push(msg.raw);
         const serverHello = parseServerHello(msg.body);
         this.serverRandom = serverHello.random;
         this.selectedCipherSuite = serverHello.cipherSuite;
         sawServerHello = true;
+        expectedServerHandshake = 'certificate';
         this.#verboseLog(
           `received ServerHello version=0x${serverHello.version.toString(16)} cipher=0x${serverHello.cipherSuite.toString(16)}`,
         );
@@ -265,23 +271,40 @@ class TlsClient {
       }
 
       if (msg.type === 0x0b) {
+        if (expectedServerHandshake !== 'certificate') {
+          throw new Error('Unexpected Certificate ordering in handshake');
+        }
+
         this.handshakeTranscript.push(msg.raw);
         const chain = parseCertificate(msg.body);
         this.serverCertChain = chain;
         serverCertPem = extractLegacyPublicServerCert(chain);
         sawServerCert = true;
+        expectedServerHandshake = 'certificate_request_or_done';
         this.#verboseLog(`received server certificate chain entries=${chain.length}`);
         continue;
       }
 
       if (msg.type === 0x0d) {
+        if (expectedServerHandshake !== 'certificate_request_or_done' || certRequest) {
+          throw new Error('Unexpected CertificateRequest ordering in handshake');
+        }
+
         this.handshakeTranscript.push(msg.raw);
         certRequest = parseCertificateRequest(msg.body);
+        expectedServerHandshake = 'server_hello_done';
         this.#verboseLog('server requested client certificate');
         continue;
       }
 
       if (msg.type === 0x0e) {
+        if (expectedServerHandshake !== 'certificate_request_or_done' && expectedServerHandshake !== 'server_hello_done') {
+          throw new Error('Unexpected ServerHelloDone ordering in handshake');
+        }
+        if (msg.body.length !== 0) {
+          throw new Error('ServerHelloDone must have an empty body');
+        }
+
         this.handshakeTranscript.push(msg.raw);
         break;
       }
@@ -376,6 +399,9 @@ class TlsClient {
     }
     if (ccs.type !== 0x14) {
       throw new Error(`Expected ChangeCipherSpec from server, got record type ${ccs.type}`);
+    }
+    if (ccs.fragment.length !== 1 || ccs.fragment.readUInt8(0) !== 0x01) {
+      throw new Error('Malformed ChangeCipherSpec from server');
     }
     this.#verboseLog('received ChangeCipherSpec from server');
 

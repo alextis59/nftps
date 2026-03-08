@@ -141,6 +141,7 @@ class TlsRecordLayer {
     const fragment = await this.tcp.readExactly(length);
     const c = this.cipher;
     const seqNum = c.serverSeqNum;
+    const blockSize = Number.isInteger(c.blockSize) && c.blockSize > 0 ? c.blockSize : 16;
     const ivLength = Number.isInteger(c.ivLength) && c.ivLength > 0 ? c.ivLength : 16;
     const cipherAlgorithm = typeof c.cipherAlgorithm === 'string' && c.cipherAlgorithm.length > 0
       ? c.cipherAlgorithm
@@ -152,6 +153,9 @@ class TlsRecordLayer {
 
     const iv = fragment.subarray(0, ivLength);
     const ciphertext = fragment.subarray(ivLength);
+    if (ciphertext.length === 0 || ciphertext.length % blockSize !== 0) {
+      throw new Error('Invalid encrypted fragment length');
+    }
 
     const decipher = crypto.createDecipheriv(cipherAlgorithm, c.serverWriteKey, iv);
     decipher.setAutoPadding(false);
@@ -165,6 +169,11 @@ class TlsRecordLayer {
     const totalPadLen = padLen + 1;
     if (totalPadLen > plain.length) {
       throw new Error('Invalid padding length');
+    }
+    for (let i = plain.length - totalPadLen; i < plain.length; i += 1) {
+      if (plain[i] !== padLen) {
+        throw new Error('Invalid padding bytes');
+      }
     }
     plain = plain.subarray(0, plain.length - totalPadLen);
 

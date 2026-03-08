@@ -85,3 +85,5 @@ run().catch((err) => {
   process.exitCode = 1;
 });
 ```
+
+For TLS 1.3 on the control channel, set `minVersion: 'TLSv1.3'` and `maxVersion: 'TLSv1.3'`. That path uses Node's native TLS stack, so `clearCommandChannel()` cannot downgrade the socket back to plaintext; use `clearCommandChannel({ downgrade: false })` only if you need to send `CCC` while keeping the local session encrypted.

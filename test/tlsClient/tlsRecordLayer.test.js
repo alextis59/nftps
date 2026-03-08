@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
+const crypto = require('node:crypto');
 const { TlsRecordLayer } = require('../../src/tlsClient/tlsRecordLayer.js');
 
 class FakeTcp {
@@ -159,4 +160,38 @@ test('readEncryptedRecord validates version and fragment size', async () => {
   const layer2 = new TlsRecordLayer(new FakeTcp([shortFragmentHeader, Buffer.alloc(8)]));
   layer2.installCipher(makeCipher());
   await assert.rejects(() => layer2.readEncryptedRecord(), /Encrypted fragment too short/);
+});
+
+test('readEncryptedRecord rejects records with invalid CBC padding bytes', async () => {
+  const cipher = makeCipher();
+  const contentType = 0x17;
+  const plaintext = Buffer.from('ping');
+
+  const seqBuf = Buffer.alloc(8);
+  seqBuf.writeBigUInt64BE(0n);
+  const headerForMac = Buffer.alloc(5);
+  headerForMac.writeUInt8(contentType, 0);
+  headerForMac.writeUInt16BE(0x0303, 1);
+  headerForMac.writeUInt16BE(plaintext.length, 3);
+  const mac = crypto
+    .createHmac(cipher.macAlgorithm, cipher.serverWriteMacKey)
+    .update(Buffer.concat([seqBuf, headerForMac, plaintext]))
+    .digest();
+
+  const invalidPadding = Buffer.from([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x01, 0x07]);
+  const plain = Buffer.concat([plaintext, mac, invalidPadding]);
+  const iv = Buffer.alloc(16, 0x11);
+  const enc = crypto.createCipheriv(cipher.cipherAlgorithm, cipher.serverWriteKey, iv);
+  enc.setAutoPadding(false);
+  const encrypted = Buffer.concat([enc.update(plain), enc.final()]);
+  const fragment = Buffer.concat([iv, encrypted]);
+
+  const header = Buffer.alloc(5);
+  header.writeUInt8(contentType, 0);
+  header.writeUInt16BE(0x0303, 1);
+  header.writeUInt16BE(fragment.length, 3);
+
+  const layer = new TlsRecordLayer(new FakeTcp([header, fragment]));
+  layer.installCipher(cipher);
+  await assert.rejects(() => layer.readEncryptedRecord(), /Invalid padding bytes/);
 });

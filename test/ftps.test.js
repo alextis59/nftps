@@ -10,17 +10,39 @@ const {
 } = require('../support/customImplicitFtpsServer.js');
 const { loadCertificateFixtures } = require('../support/testCertFixtures.js');
 
-async function createFtpsServer(credentials, onSecureConnection = () => {}) {
-  const { key, cert, ...rest } = credentials;
-  const server = tls.createServer({
+function createServerTlsOptions(credentials) {
+  const {
+    key,
+    cert,
+    ciphers,
+    minVersion = 'TLSv1.2',
+    maxVersion = 'TLSv1.2',
+    requestCert = false,
+    rejectUnauthorized = false,
+    ...rest
+  } = credentials;
+  const options = {
     key,
     cert,
     ...rest,
-    ciphers: 'AES128-SHA',
+    requestCert,
+    rejectUnauthorized,
     honorCipherOrder: true,
-    minVersion: 'TLSv1.2',
-    maxVersion: 'TLSv1.2',
-  });
+    minVersion,
+    maxVersion,
+  };
+
+  if (ciphers !== undefined) {
+    options.ciphers = ciphers;
+  } else if (!(minVersion === 'TLSv1.3' && maxVersion === 'TLSv1.3')) {
+    options.ciphers = 'AES128-SHA';
+  }
+
+  return options;
+}
+
+async function createFtpsServer(credentials, onSecureConnection = () => {}) {
+  const server = tls.createServer(createServerTlsOptions(credentials));
 
   server.on('secureConnection', (socket) => {
     onSecureConnection(socket);
@@ -33,6 +55,39 @@ async function createFtpsServer(credentials, onSecureConnection = () => {}) {
       const addr = server.address();
       if (!addr || typeof addr === 'string') {
         reject(new Error('Unable to determine FTPS server address'));
+        return;
+      }
+
+      server.off('error', reject);
+      resolve({
+        port: addr.port,
+        close: () =>
+          new Promise((closeResolve, closeReject) => {
+            server.close((err) => (err ? closeReject(err) : closeResolve()));
+          }),
+      });
+    });
+  });
+}
+
+async function createExplicitFtpsServer(credentials, onSecureConnection = () => {}) {
+  const serverTlsOptions = createServerTlsOptions(credentials);
+  const {
+    requestCert = false,
+    rejectUnauthorized = false,
+    ...secureContextOptions
+  } = serverTlsOptions;
+  const secureContext = tls.createSecureContext(secureContextOptions);
+  const server = net.createServer((socket) => {
+    handleExplicitConnection(socket, { secureContext, requestCert, rejectUnauthorized }, onSecureConnection);
+  });
+
+  return await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      if (!addr || typeof addr === 'string') {
+        reject(new Error('Unable to determine explicit FTPS server address'));
         return;
       }
 
@@ -106,6 +161,98 @@ function handleConnection(socket) {
   socket.on('data', onData);
   socket.once('error', cleanup);
   sendLine('220 Test FTPS server ready');
+}
+
+function handleExplicitConnection(socket, tlsOptions, onSecureConnection = () => {}) {
+  let loggedIn = false;
+  let buffer = Buffer.alloc(0);
+  let controlSocket = socket;
+  let secure = false;
+
+  const cleanup = () => controlSocket.destroy();
+  const sendLine = (line) => controlSocket.write(`${line}\r\n`);
+  const attachControlSocket = (nextSocket) => {
+    controlSocket.off('data', onData);
+    controlSocket.off('error', cleanup);
+    controlSocket = nextSocket;
+    buffer = Buffer.alloc(0);
+    controlSocket.on('data', onData);
+    controlSocket.once('error', cleanup);
+  };
+  const startTlsUpgrade = () => {
+    const tlsSocket = new tls.TLSSocket(socket, {
+      isServer: true,
+      secureContext: tlsOptions.secureContext,
+      requestCert: tlsOptions.requestCert,
+      rejectUnauthorized: tlsOptions.rejectUnauthorized,
+    });
+    secure = true;
+    attachControlSocket(tlsSocket);
+    tlsSocket.once('secure', () => onSecureConnection(tlsSocket));
+  };
+
+  const processCommand = (line) => {
+    const [command, ...rest] = line.trim().split(/\s+/);
+    const arg = rest.join(' ');
+
+    switch (command?.toUpperCase()) {
+      case 'AUTH':
+        if (secure) {
+          sendLine('503 Control channel already protected.');
+          return;
+        }
+        if (arg.toUpperCase() !== 'TLS') {
+          sendLine('502 Only AUTH TLS is supported.');
+          return;
+        }
+        controlSocket.write('234 Proceed with negotiation.\r\n', startTlsUpgrade);
+        return;
+      case 'USER':
+        sendLine('331 User name okay, need password.');
+        return;
+      case 'PASS':
+        loggedIn = true;
+        sendLine('230 User logged in, proceed.');
+        return;
+      case 'PBSZ':
+        sendLine('200 PBSZ set to 0.');
+        return;
+      case 'PROT':
+        sendLine('200 Protection level set to Private.');
+        return;
+      case 'CCC':
+        sendLine('200 Command channel remains protected.');
+        return;
+      case 'PWD':
+        if (!loggedIn) {
+          sendLine('530 Not logged in.');
+          return;
+        }
+        sendLine('257 "/" is current directory');
+        return;
+      case 'QUIT':
+        sendLine('221 Service closing control connection.');
+        controlSocket.end();
+        return;
+      default:
+        sendLine('502 Command not implemented');
+    }
+  };
+
+  const onData = (chunk) => {
+    buffer = Buffer.concat([buffer, chunk]);
+    while (true) {
+      const idx = buffer.indexOf(0x0a);
+      if (idx === -1) break;
+      const line = buffer.subarray(0, idx + 1).toString('utf8').replace(/\r?\n$/, '');
+      buffer = buffer.subarray(idx + 1);
+      processCommand(line);
+    }
+  };
+
+  controlSocket.on('data', onData);
+  controlSocket.once('error', cleanup);
+  sendLine('220 Test explicit FTPS server ready');
 }
 
 function createLineReader(stream) {
@@ -231,6 +378,151 @@ test('custom FTPS client negotiates and logs in', async (t) => {
   ]);
   assert.ok(verboseLogs.some((line) => line.includes('sent control command: "USER test"')));
   assert.ok(verboseLogs.some((line) => line.includes('received secure control data: "230 User logged in, proceed."')));
+});
+
+test('custom FTPS client drains multiline replies before reading the next response', async (t) => {
+  const commandsSeen = [];
+  const received = [];
+
+  const server = net.createServer((socket) => {
+    socket.write('220-First line\r\n220 Second line\r\n');
+    socket.on('data', (chunk) => {
+      const lines = chunk.toString('utf8').split(/\r?\n/).filter(Boolean);
+      for (const line of lines) {
+        commandsSeen.push(line);
+        if (line === 'USER test') {
+          socket.write('331-Password required\r\n331 Continue\r\n');
+          continue;
+        }
+        if (line === 'PASS password') {
+          socket.write('230 User logged in\r\n');
+          continue;
+        }
+        if (line === 'QUIT') {
+          socket.write('221 Goodbye\r\n');
+          socket.end();
+        }
+      }
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('Unable to determine multiline FTP server address');
+  }
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: address.port,
+    secure: false,
+  });
+
+  client.on('data', (line) => received.push(line));
+
+  t.after(async () => {
+    await client.close();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  await client.connect();
+  const passResp = await client.login('test', 'password');
+  assert.match(passResp, /^230/);
+  await client.quit();
+
+  assert.deepStrictEqual(commandsSeen, ['USER test', 'PASS password', 'QUIT']);
+  assert.deepStrictEqual(received, [
+    '220-First line',
+    '220 Second line',
+    '331-Password required',
+    '331 Continue',
+    '230 User logged in',
+    '221 Goodbye',
+  ]);
+});
+
+test('FTPS client negotiates implicit TLS 1.3 via Node TLS transport', async (t) => {
+  const fixtures = await loadCertificateFixtures();
+  const server = await createFtpsServer({
+    key: fixtures.serverKey,
+    cert: fixtures.serverCert,
+    minVersion: 'TLSv1.3',
+    maxVersion: 'TLSv1.3',
+  });
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    ca: [fixtures.caCert],
+    minVersion: 'TLSv1.3',
+    maxVersion: 'TLSv1.3',
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await withTimeout(client.connect(), 'connect with implicit TLS 1.3');
+  assert.strictEqual(client.tlsClient.implementation, 'node');
+  assert.strictEqual(client.tlsClient.tlsSocket.getProtocol(), 'TLSv1.3');
+
+  await withTimeout(client.login('test', 'password'), 'login over TLS 1.3');
+  const pwdResp = await withTimeout(client.pwd(), 'PWD over TLS 1.3');
+  assert.match(pwdResp, /^257/);
+  await withTimeout(client.quit(), 'quit over TLS 1.3');
+});
+
+test('FTPS client upgrades with AUTH TLS to TLS 1.3 and keeps the control channel protected', async (t) => {
+  const fixtures = await loadCertificateFixtures();
+  const server = await createExplicitFtpsServer({
+    key: fixtures.serverKey,
+    cert: fixtures.serverCert,
+    minVersion: 'TLSv1.3',
+    maxVersion: 'TLSv1.3',
+  });
+
+  const client = new FtpsClient({
+    host: '127.0.0.1',
+    port: server.port,
+    servername: 'localhost',
+    secure: false,
+    ca: [fixtures.caCert],
+    minVersion: 'TLSv1.3',
+    maxVersion: 'TLSv1.3',
+  });
+
+  t.after(async () => {
+    await client.close();
+    await server.close();
+  });
+
+  await withTimeout(client.connect(), 'plain FTP connect before TLS 1.3 upgrade');
+  await withTimeout(client.upgradeControlChannel(), 'AUTH TLS 1.3 upgrade');
+  assert.strictEqual(client.tlsClient.implementation, 'node');
+  assert.strictEqual(client.tlsClient.tlsSocket.getProtocol(), 'TLSv1.3');
+
+  await withTimeout(client.login('test', 'password'), 'login after AUTH TLS 1.3 upgrade');
+  await assert.rejects(
+    () => withTimeout(client.clearCommandChannel(), 'CCC downgrade on TLS 1.3 session'),
+    /cannot downgrade a Node TLS session to plain TCP/i,
+  );
+
+  const cccResp = await withTimeout(
+    client.clearCommandChannel({ downgrade: false }),
+    'CCC without downgrade on TLS 1.3 session',
+  );
+  assert.match(cccResp, /^200/);
+  assert.strictEqual(client.secure, true, 'client should remain on the protected control channel');
+  assert.ok(client.tlsClient, 'TLS transport should remain attached when downgrade is disabled');
+
+  const pwdResp = await withTimeout(client.pwd(), 'PWD over protected TLS 1.3 control channel');
+  assert.match(pwdResp, /^257/);
+  await withTimeout(client.quit(), 'quit over protected TLS 1.3 control channel');
 });
 
 test('custom FTPS client downgrades to clear TCP after explicit TLS shutdown', { timeout: 6000 }, async (t) => {
@@ -451,7 +743,7 @@ test('custom FTPS client parses PASV and can ignore server-advertised address', 
     socket.on('data', (chunk) => {
       const input = chunk.toString('utf8');
       if (input.includes('PASV')) {
-        socket.write(`227 Entering Passive Mode (10,0,0,1,${p1},${p2})\r\n`);
+        socket.write(`227 Entering Passive Mode (127,0,0,2,${p1},${p2})\r\n`);
       }
       if (input.includes('PWD')) {
         socket.write('257 "/" is current directory\r\n');
@@ -497,9 +789,9 @@ test('custom FTPS client parses PASV and can ignore server-advertised address', 
   await client.exitPassiveMode();
 
   await assert.rejects(
-    () => client.enterPassiveMode({ ignoreAddress: false }),
-    /ENETUNREACH/,
-    'enterPassiveMode should try the advertised PASV host when ignoreAddress is false',
+    () => withTimeout(client.enterPassiveMode({ ignoreAddress: false }), 'PASV connect using advertised address', 2000),
+    /ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|Timeout while waiting for PASV connect using advertised address/,
+    'enterPassiveMode should try the advertised PASV host when ignoreAddress is false instead of the control host',
   );
 
   const reenteredEndpoint = await client.enterPassiveMode();

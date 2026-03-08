@@ -1,11 +1,21 @@
 const test = require('node:test');
 const assert = require('node:assert');
+const crypto = require('node:crypto');
 const {
   createTestTlsServer,
   TlsClient,
   createEchoTlsServer,
   loadCertificateFixtures,
 } = require('../../support/tlsClientTestHelpers.js');
+const {
+  parsePemCertificateChain,
+  parsePrivateKey,
+  parseCaCertificates,
+  verifyServerCertificateChain,
+  parseServerCertificate,
+  extractLegacyPublicServerCert,
+  ensureClientAuthMaterial,
+} = require('../../src/tlsClient/certificates.js');
 
 test('custom TLS client presents a certificate when required', async (t) => {
   const fixtures = await loadCertificateFixtures();
@@ -106,4 +116,120 @@ test('custom TLS client can skip CA validation when rejectUnauthorized is false'
   await client.sendApplicationData(Buffer.from('ping'));
   const response = await client.readApplicationData();
   assert.strictEqual(response.toString('utf8'), 'ping');
+});
+
+test('certificate helpers parse PEM values into expected structures', async () => {
+  const fixtures = await loadCertificateFixtures();
+
+  assert.deepStrictEqual(parsePemCertificateChain(undefined), []);
+  const combinedChain = parsePemCertificateChain(`${fixtures.serverCert}\n${fixtures.caCert}`);
+  assert.strictEqual(combinedChain.length, 2);
+
+  assert.strictEqual(parsePrivateKey(undefined), undefined);
+  assert.match(parsePrivateKey(Buffer.from(fixtures.clientKey)), /BEGIN .*PRIVATE KEY/);
+
+  assert.strictEqual(parseCaCertificates(undefined), undefined);
+  const caCertificates = parseCaCertificates([fixtures.caCert, Buffer.from(fixtures.wrongCaCert)]);
+  assert.strictEqual(caCertificates.length, 2);
+  assert.ok(caCertificates.every((cert) => cert instanceof crypto.X509Certificate));
+
+  const serverPem = parseServerCertificate(combinedChain[0]);
+  assert.match(serverPem, /BEGIN CERTIFICATE/);
+  assert.strictEqual(extractLegacyPublicServerCert(combinedChain), serverPem);
+});
+
+test('certificate helpers reject malformed material and accept matching client auth', async () => {
+  const fixtures = await loadCertificateFixtures();
+  const clientChain = parsePemCertificateChain(fixtures.clientCert);
+  const clientKey = parsePrivateKey(fixtures.clientKey);
+
+  assert.throws(() => parsePemCertificateChain(123), /clientCert must be a string or Buffer/);
+  assert.throws(
+    () => parsePemCertificateChain('not a certificate'),
+    /clientCert must contain at least one CERTIFICATE block/,
+  );
+  assert.throws(() => parseCaCertificates(123), /ca must be a string or Buffer/);
+  assert.throws(() => parsePrivateKey(123), /clientKey must be a string or Buffer/);
+  assert.throws(() => parseServerCertificate('nope'), /server certificate must be a Buffer/);
+  assert.throws(() => extractLegacyPublicServerCert([]), /Server certificate chain is empty/);
+
+  assert.doesNotThrow(() => ensureClientAuthMaterial([], undefined));
+  assert.doesNotThrow(() => ensureClientAuthMaterial(clientChain, clientKey));
+});
+
+test('verifyServerCertificateChain supports direct trust and issuer lookup paths', async () => {
+  const fixtures = await loadCertificateFixtures();
+  const [serverDer] = parsePemCertificateChain(fixtures.serverCert);
+  const [caDer] = parsePemCertificateChain(fixtures.caCert);
+  const trustLeaf = new crypto.X509Certificate(fixtures.serverCert);
+  const trustCa = new crypto.X509Certificate(fixtures.caCert);
+
+  assert.doesNotThrow(() =>
+    verifyServerCertificateChain({
+      chainDer: [serverDer],
+      hostname: 'localhost',
+      caCertificates: [trustLeaf],
+    }),
+  );
+  assert.doesNotThrow(() =>
+    verifyServerCertificateChain({
+      chainDer: [serverDer],
+      hostname: 'localhost',
+      caCertificates: [trustCa],
+    }),
+  );
+  assert.doesNotThrow(() =>
+    verifyServerCertificateChain({
+      chainDer: [serverDer, caDer],
+      hostname: 'localhost',
+      caCertificates: [trustCa],
+    }),
+  );
+  assert.doesNotThrow(() =>
+    verifyServerCertificateChain({
+      chainDer: [serverDer],
+      caCertificates: [trustLeaf],
+    }),
+  );
+});
+
+test('verifyServerCertificateChain rejects empty trust, malformed candidates, and untrusted defaults', async () => {
+  const fixtures = await loadCertificateFixtures();
+  const [serverDer] = parsePemCertificateChain(fixtures.serverCert);
+
+  assert.throws(
+    () =>
+      verifyServerCertificateChain({
+        chainDer: [],
+        hostname: 'localhost',
+        caCertificates: [new crypto.X509Certificate(fixtures.caCert)],
+      }),
+    /Server did not present a certificate chain/,
+  );
+  assert.throws(
+    () =>
+      verifyServerCertificateChain({
+        chainDer: [serverDer],
+        hostname: 'localhost',
+        caCertificates: [],
+      }),
+    /No trusted CA certificates available for server validation/,
+  );
+  assert.throws(
+    () =>
+      verifyServerCertificateChain({
+        chainDer: [serverDer],
+        hostname: 'localhost',
+        caCertificates: [{ fingerprint256: 'bogus' }],
+      }),
+    /Server certificate chain is not signed by a trusted CA/,
+  );
+  assert.throws(
+    () =>
+      verifyServerCertificateChain({
+        chainDer: [serverDer],
+        hostname: 'localhost',
+      }),
+    /Server certificate chain is not signed by a trusted CA/,
+  );
 });

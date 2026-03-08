@@ -16,7 +16,7 @@ This repository is test-first and intended for experimentation.
 
 It includes:
 - a custom TLS 1.2 client (`TlsClient`)
-- a custom FTPS client (`FtpsClient`) on top of that TLS client
+- a custom FTPS client (`FtpsClient`) that uses the custom TLS 1.2 stack by default and switches to Node TLS for TLS 1.3 requests
 - local TLS test server helpers (`createTestTlsServer`)
 
 `transcript.md` contains background discussion. Runtime behavior is defined by code under `src/` and tests under `test/`.

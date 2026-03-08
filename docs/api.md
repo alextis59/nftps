@@ -129,6 +129,12 @@ Record framing and encryption/decryption for TLS records.
 
 `FtpsClient` extends `EventEmitter`.
 
+Transport behavior:
+- `maxVersion <= TLSv1.2`: uses the custom `TlsClient`.
+- `maxVersion > TLSv1.2`: uses Node's `tls` implementation so the session can negotiate TLS 1.3.
+- `cipherSuites`, `compressionMethods`, and `extensions` are only supported on the custom TLS 1.2 path.
+- `clearCommandChannel({ downgrade: true })` is only available on the custom TLS 1.2 path; when using TLS 1.3, pass `{ downgrade: false }` if you need to send `CCC` without locally downgrading the socket.
+
 ### Constructor Options
 
 - `host`

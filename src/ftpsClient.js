@@ -1,6 +1,71 @@
 const net = require('node:net');
 const { EventEmitter } = require('node:events');
 const { TlsClient } = require('./tlsClient.js');
+const { NodeTlsTransport } = require('./nodeTlsTransport.js');
+
+const TLS_VERSION_ORDER = {
+  TLSv1: 0x0301,
+  'TLSv1.1': 0x0302,
+  'TLSv1.2': 0x0303,
+  'TLSv1.3': 0x0304,
+};
+const SUPPORTED_TLS_VERSION_NAMES = Object.keys(TLS_VERSION_ORDER);
+
+function parseConfiguredTlsVersion(version, fieldName) {
+  if (version === undefined) {
+    return undefined;
+  }
+
+  if (typeof version !== 'string') {
+    throw new TypeError(`${fieldName} must be a string`);
+  }
+
+  const code = TLS_VERSION_ORDER[version];
+  if (!code) {
+    throw new TypeError(`${fieldName} must be one of: ${SUPPORTED_TLS_VERSION_NAMES.join(', ')}`);
+  }
+
+  return { name: version, code };
+}
+
+function resolveTlsVersionRange(minVersion, maxVersion) {
+  const min = parseConfiguredTlsVersion(minVersion, 'minVersion') || {
+    name: 'TLSv1.2',
+    code: TLS_VERSION_ORDER['TLSv1.2'],
+  };
+  const max = parseConfiguredTlsVersion(maxVersion, 'maxVersion') || {
+    name: 'TLSv1.2',
+    code: TLS_VERSION_ORDER['TLSv1.2'],
+  };
+
+  if (min.code > max.code) {
+    throw new TypeError('minVersion cannot be greater than maxVersion');
+  }
+
+  return { min, max };
+}
+
+function selectTlsTransportType({ minVersion, maxVersion, cipherSuites, compressionMethods, extensions }) {
+  const { max } = resolveTlsVersionRange(minVersion, maxVersion);
+
+  if (max.code <= TLS_VERSION_ORDER['TLSv1.2']) {
+    return 'custom';
+  }
+
+  if (cipherSuites !== undefined) {
+    throw new TypeError('cipherSuites is only supported by the custom TLSv1.2 transport; use ciphers for TLSv1.3');
+  }
+
+  if (compressionMethods !== undefined) {
+    throw new TypeError('compressionMethods is only supported by the custom TLSv1.2 transport');
+  }
+
+  if (extensions !== undefined) {
+    throw new TypeError('extensions is only supported by the custom TLSv1.2 transport');
+  }
+
+  return 'node';
+}
 
 class FtpsClient extends EventEmitter {
   constructor({
@@ -46,6 +111,7 @@ class FtpsClient extends EventEmitter {
     this.socket = null;
     this.passiveDataSocket = null;
     this.tlsClient = null;
+    this.tlsTransportType = null;
     this.secureBuffer = Buffer.alloc(0);
     this.plainBuffer = Buffer.alloc(0);
     this.passiveBuffer = Buffer.alloc(0);
@@ -103,25 +169,10 @@ class FtpsClient extends EventEmitter {
     });
 
     if (this.secure) {
-      this.tlsClient = await TlsClient.fromExistingSocket(this.socket, {
-        servername: this.servername,
-        clientCert: this.clientCert,
-        clientKey: this.clientKey,
-        ca: this.ca,
-        rejectUnauthorized: this.rejectUnauthorized,
-        checkServerIdentity: this.checkServerIdentity,
-        cipherSuites: this.cipherSuites,
-        ciphers: this.ciphers,
-        minVersion: this.minVersion,
-        maxVersion: this.maxVersion,
-        compressionMethods: this.compressionMethods,
-        extensions: this.extensions,
-        verbose: this.verbose,
-        log: this.log,
-      });
+      this.tlsClient = await this.#createSecureTransport();
     }
 
-    const greeting = await this.#readLine();
+    const greeting = await this.#readResponse();
     this.#assertCode(greeting, 220, 'FTPS server greeting');
   }
 
@@ -151,22 +202,7 @@ class FtpsClient extends EventEmitter {
     const authResp = await this.sendCommand('AUTH TLS');
     this.#assertCode(authResp, 234, 'AUTH TLS response');
 
-    this.tlsClient = await TlsClient.fromExistingSocket(this.socket, {
-      servername: this.servername,
-      clientCert: this.clientCert,
-      clientKey: this.clientKey,
-      ca: this.ca,
-      rejectUnauthorized: this.rejectUnauthorized,
-      checkServerIdentity: this.checkServerIdentity,
-      cipherSuites: this.cipherSuites,
-      ciphers: this.ciphers,
-      minVersion: this.minVersion,
-      maxVersion: this.maxVersion,
-      compressionMethods: this.compressionMethods,
-      extensions: this.extensions,
-      verbose: this.verbose,
-      log: this.log,
-    });
+    this.tlsClient = await this.#createSecureTransport();
     this.secure = true;
     this.secureBuffer = Buffer.alloc(0);
   }
@@ -187,6 +223,12 @@ class FtpsClient extends EventEmitter {
       return this.sendCommand('CCC');
     }
 
+    if (downgrade && this.tlsTransportType === 'node') {
+      throw new Error(
+        'clearCommandChannel cannot downgrade a Node TLS session to plain TCP; pass { downgrade: false } or request TLSv1.2',
+      );
+    }
+
     const resp = await this.sendCommand('CCC');
     this.#assertCode(resp, 200, 'CCC response');
     if (downgrade) {
@@ -195,6 +237,7 @@ class FtpsClient extends EventEmitter {
         timeoutMs: closeNotifyTimeoutMs,
       });
       this.tlsClient = null;
+      this.tlsTransportType = null;
       this.secure = false;
       this.plainBuffer = Buffer.alloc(0);
     }
@@ -223,6 +266,7 @@ class FtpsClient extends EventEmitter {
     } finally {
       await this.exitPassiveMode();
       this.tlsClient = null;
+      this.tlsTransportType = null;
       if (this.socket) {
         this.socket.destroy();
         this.socket = null;
@@ -243,7 +287,7 @@ class FtpsClient extends EventEmitter {
       throw new Error('FTPS client is not connected');
     }
 
-    return this.#readLine();
+    return this.#readResponse();
   }
 
   async #readLine() {
@@ -271,6 +315,71 @@ class FtpsClient extends EventEmitter {
       const chunk = await nextChunk();
       this[bufferKey] = Buffer.concat([buf, chunk]);
     }
+  }
+
+  async #readResponse() {
+    const firstLine = await this.#readLine();
+    const multilineMatch = firstLine.match(/^(\d{3})-/);
+    if (!multilineMatch) {
+      return firstLine;
+    }
+
+    const code = multilineMatch[1];
+    while (true) {
+      const line = await this.#readLine();
+      if (line.startsWith(`${code} `)) {
+        return line;
+      }
+    }
+  }
+
+  async #createSecureTransport() {
+    const transportType = selectTlsTransportType({
+      minVersion: this.minVersion,
+      maxVersion: this.maxVersion,
+      cipherSuites: this.cipherSuites,
+      compressionMethods: this.compressionMethods,
+      extensions: this.extensions,
+    });
+
+    if (transportType === 'node') {
+      const requestedMinVersion = this.minVersion || 'TLSv1.2';
+      const requestedMaxVersion = this.maxVersion || 'TLSv1.2';
+      this.#verboseLog(`using Node TLS transport for requested range ${requestedMinVersion}-${requestedMaxVersion}`);
+      const transport = await NodeTlsTransport.fromExistingSocket(this.socket, {
+        servername: this.servername,
+        clientCert: this.clientCert,
+        clientKey: this.clientKey,
+        ca: this.ca,
+        rejectUnauthorized: this.rejectUnauthorized,
+        checkServerIdentity: this.checkServerIdentity,
+        ciphers: this.ciphers,
+        minVersion: this.minVersion,
+        maxVersion: this.maxVersion,
+      });
+      this.tlsTransportType = 'node';
+      this.#verboseLog(`Node TLS handshake completed with protocol ${transport.tlsSocket.getProtocol()}`);
+      return transport;
+    }
+
+    const transport = await TlsClient.fromExistingSocket(this.socket, {
+      servername: this.servername,
+      clientCert: this.clientCert,
+      clientKey: this.clientKey,
+      ca: this.ca,
+      rejectUnauthorized: this.rejectUnauthorized,
+      checkServerIdentity: this.checkServerIdentity,
+      cipherSuites: this.cipherSuites,
+      ciphers: this.ciphers,
+      minVersion: this.minVersion,
+      maxVersion: this.maxVersion,
+      compressionMethods: this.compressionMethods,
+      extensions: this.extensions,
+      verbose: this.verbose,
+      log: this.log,
+    });
+    this.tlsTransportType = 'custom';
+    return transport;
   }
 
   #assertCode(line, expected, context) {

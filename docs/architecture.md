@@ -11,7 +11,8 @@
 - `src/index.js`: public API exports.
 - `src/tlsClient.js`: compatibility shim that re-exports `src/tlsClient/index.js`.
 - `src/tlsClient/`: custom TLS client split by concern.
-- `src/ftpsClient.js`: FTPS control/data channel workflow built on `TlsClient`.
+- `src/ftpsClient.js`: FTPS control/data channel workflow with transport selection.
+- `src/nodeTlsTransport.js`: internal adapter around Node's `tls` module for FTPS sessions that negotiate TLS 1.3.
 - `src/tlsServer.js`: helper to spin up local TLS test servers.
 
 ## TLS Client Internals (`src/tlsClient/`)
@@ -32,9 +33,14 @@
 - Implicit FTPS (`secure: true`): TLS handshake on connect.
 - Explicit FTPS (`secure: false`): clear FTP connect, then `AUTH TLS` upgrade.
 
+Transport selection:
+- `maxVersion <= TLSv1.2`: use the custom `TlsClient`.
+- `maxVersion > TLSv1.2`: use Node's `tls` stack so the control channel can negotiate TLS 1.3.
+
 Control channel operations:
 - `sendCommand` writes command and reads line response.
-- `clearCommandChannel` sends `CCC`; default path performs TLS `close_notify` and downgrades to clear TCP.
+- `clearCommandChannel` sends `CCC`; the custom TLS 1.2 path can perform `close_notify` and downgrade to clear TCP.
+- Node TLS sessions cannot unwrap back to raw TCP after shutdown, so `clearCommandChannel({ downgrade: false })` is required when the FTPS client is using TLS 1.3.
 
 Passive data channel operations:
 - `enterPassiveMode` parses `PASV` response (`227 (...)`).

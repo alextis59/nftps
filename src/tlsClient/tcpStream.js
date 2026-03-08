@@ -4,7 +4,12 @@
  */
 class TcpStream {
   #buffer = Buffer.alloc(0);
+  #waiters = [];
+  #ended = false;
+  #error = null;
   #onData;
+  #onClose;
+  #onError;
 
   /**
    * @param {import('node:net').Socket} socket
@@ -13,8 +18,37 @@ class TcpStream {
     this.socket = socket;
     this.#onData = (chunk) => {
       this.#buffer = Buffer.concat([this.#buffer, chunk]);
+      const waiters = this.#waiters;
+      this.#waiters = [];
+      for (const waiter of waiters) {
+        waiter.resolve();
+      }
+    };
+    this.#onClose = () => {
+      if (this.#ended) {
+        return;
+      }
+
+      this.#ended = true;
+      const err = new Error('Socket closed while waiting for TLS record bytes');
+      const waiters = this.#waiters;
+      this.#waiters = [];
+      for (const waiter of waiters) {
+        waiter.reject(err);
+      }
+    };
+    this.#onError = (err) => {
+      this.#error = err;
+      const waiters = this.#waiters;
+      this.#waiters = [];
+      for (const waiter of waiters) {
+        waiter.reject(err);
+      }
     };
     socket.on('data', this.#onData);
+    socket.on('end', this.#onClose);
+    socket.on('close', this.#onClose);
+    socket.on('error', this.#onError);
   }
 
   /**
@@ -32,30 +66,15 @@ class TcpStream {
     }
 
     while (this.#buffer.length < n) {
-      await new Promise((resolve, reject) => {
-        const cleanup = () => {
-          this.socket.off('error', onError);
-          this.socket.off('end', onClose);
-          this.socket.off('close', onClose);
-          this.socket.off('data', onData);
-        };
-        const onError = (err) => {
-          cleanup();
-          reject(err);
-        };
-        const onClose = () => {
-          cleanup();
-          reject(new Error('Socket closed while waiting for TLS record bytes'));
-        };
-        const onData = () => {
-          cleanup();
-          resolve();
-        };
+      if (this.#error) {
+        throw this.#error;
+      }
+      if (this.#ended) {
+        throw new Error('Socket closed while waiting for TLS record bytes');
+      }
 
-        this.socket.once('error', onError);
-        this.socket.once('end', onClose);
-        this.socket.once('close', onClose);
-        this.socket.once('data', onData);
+      await new Promise((resolve, reject) => {
+        this.#waiters.push({ resolve, reject });
       });
     }
 
